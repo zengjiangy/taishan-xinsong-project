@@ -1,0 +1,14 @@
+# Cloudflare Workers 静态资源部署配置
+# 只发布 dist/index.html 这一个文件（构建产物），源码与测试不进 CDN。
+name = "qinglan-qa-lab"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./dist"
+# 作品是哈希路由的单页应用，任何路径都回落到 index.html
+not_found_handling = "single-page-application"
+
+# 自定义域名：由 Workers Custom Domain 自动创建 DNS 记录与证书
+[[routes]]
+pattern = "qa-lab.campusphere.ltd"
+custom_domain = true

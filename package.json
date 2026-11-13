@@ -1,0 +1,15 @@
+{
+  "name": "qinglan-qa-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "「青蓝」软件质量保证与测试课程实验工作台 —— 单文件离线作品；此 package.json 仅用于开发期测试。",
+  "scripts": {
+    "build": "node build/build.mjs",
+    "test:unit": "node --test tests/spec.test.js tests/design.test.js tests/exec.test.js tests/quality.test.js tests/quiz.test.js",
+    "test:browser": "node tests/browser/smoke.mjs && node tests/browser/structure.mjs && node tests/browser/interaction.mjs && node tests/browser/persistence.mjs",
+    "test": "npm run build && npm run test:unit && npm run test:browser"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}

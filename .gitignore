@@ -1,0 +1,7 @@
+node_modules/
+.tmp/
+.wrangler/
+package-lock.json
+dist/
+.DS_Store
+Thumbs.db
