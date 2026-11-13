@@ -1,1585 +1,1055 @@
 /* ============================================================================
- * shell.js — 应用外壳：路由、导航、实验容器、证据库、导入导出
+ * shell.js — 顶部渐变工作台 + 吸顶关卡胶囊栏 + 单舞台卡通互动容器
  * ==========================================================================*/
 (function () {
   'use strict';
-  var Q = window.QT;
-  var WB = window.WB = {
-    exps: [], byId: {}, evidence: {}, state: {}, session: {},
-    version: '1.0.0', schema: 'qinglan-qa-lab/1'
-  };
 
-  /* ------------------------------------------------------------- 存储适配 */
   var STORE_KEY = 'qinglan.qa.lab.v1';
-  var memory = {};
-  var storageOk = (function () {
-    try {
-      var k = '__probe__';
-      window.localStorage.setItem(k, '1');
-      window.localStorage.removeItem(k);
-      return true;
-    } catch (e) { return false; }
-  })();
+  var SCHEMA = 'qinglan-qa-lab/1';
+  var Q = window.QT;
 
-  var store = {
-    ok: storageOk,
-    read: function () {
-      if (!storageOk) return memory;
-      try {
-        var raw = window.localStorage.getItem(STORE_KEY);
-        return raw ? JSON.parse(raw) : {};
-      } catch (e) { return memory; }
-    },
-    write: function (obj) {
-      if (!storageOk) { memory = obj; return false; }
-      try {
-        window.localStorage.setItem(STORE_KEY, JSON.stringify(obj));
-        return true;
-      } catch (e) { memory = obj; return false; }
-    }
+  var WB = window.WB = {
+    exps: [],
+    byId: {},
+    evidence: {},
+    state: {},
+    quizAnswers: {},
+    quizDrafts: {},
+    quizFilter: { topic: 'all', type: 'all', diff: 'all', mode: 'all', wrongOnly: false },
+    session: { tab: {}, gFocus: 'm1', guideSeen: false, animTimer: null },
+    version: '2.0.0',
+    schema: SCHEMA,
+    registerExp: registerExp
   };
 
-  function persist() {
-    var data = { schema: WB.schema, savedAt: new Date().toISOString(), evidence: WB.evidence, state: WB.state, session: WB.session };
-    var ok = store.write(data);
-    if (!ok) showStoreWarn();
-    return ok;
-  }
+  var EXP_META = {
+    m1: { emoji: '🔍', short: '静态找茬', plain: '不运行程序，直接扫代码揪出隐藏漏洞' },
+    m2: { emoji: '🎯', short: '等价分区', plain: '把百万种输入分成几组“同一国”，每组挑一个代表' },
+    m3: { emoji: '🚧', short: '边界跳崖', plain: 'Bug 最喜欢躲在恰好卡线、加1减1的门槛边上' },
+    m4: { emoji: '🚦', short: '决策开关', plain: '好几个条件凑一起？用开关表一眼看穿谁漏了谁打架' },
+    m5: { emoji: '🚂', short: '状态闯关', plain: '状态不对点按钮必须拦住！检查每站之间的合法路线' },
+    m6: { emoji: '💡', short: '白盒电路', plain: '揭开代码盒子，挑最少用例把所有路线点亮' },
+    m7: { emoji: '🏭', short: '流水线', plain: '提交代码自动过四道关：核心冒烟挂了必须立刻亮红灯' },
+    m8: { emoji: '🚀', short: '发布门禁', plain: '综合风险与门禁五盏绿灯，决定软件今天能不能起飞' }
+  };
 
-  var storeWarned = false;
-  function showStoreWarn() {
-    if (storeWarned) return;
-    storeWarned = true;
-    toast('浏览器本地存储不可用，当前会话数据仅保存在内存中，刷新后会丢失。', 'warn', 6000);
-  }
-
-  function loadPersisted() {
-    var d = store.read();
-    if (d && d.schema === WB.schema) {
-      WB.evidence = d.evidence && typeof d.evidence === 'object' ? d.evidence : {};
-      WB.state = d.state && typeof d.state === 'object' ? d.state : {};
-      WB.session = d.session && typeof d.session === 'object' ? d.session : {};
-    }
-    if (!store.ok) showStoreWarn();
-  }
-
-  /* ----------------------------------------------------------------- 工具 */
-  var E = Q.esc;
-  var toastHost = null;
-  function toast(msg, kind, ms) {
-    if (!toastHost) {
-      toastHost = document.createElement('div');
-      toastHost.id = 'toast-host';
-      document.body.appendChild(toastHost);
-    }
-    var el = document.createElement('div');
-    el.className = 'toast' + (kind ? ' ' + kind : '');
-    el.textContent = msg;
-    toastHost.appendChild(el);
-    setTimeout(function () { el.remove(); }, ms || 2800);
-  }
-  WB.toast = toast;
-
-  function download(name, content, mime) {
+  /* ------------------------------------------------------------------ 持久化 */
+  function loadStore() {
     try {
-      var blob = new Blob([content], { type: mime || 'text/plain;charset=utf-8' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url; a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 200);
-      return true;
+      var probe = '__qa_probe__';
+      localStorage.setItem(probe, '1');
+      localStorage.removeItem(probe);
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      var parsed = JSON.parse(raw);
+      if (parsed && parsed.evidence) WB.evidence = parsed.evidence;
+      if (parsed && parsed.state) WB.state = parsed.state;
+      if (parsed && parsed.quizAnswers) WB.quizAnswers = parsed.quizAnswers;
     } catch (e) {
-      toast('导出失败：' + e.message, 'fail');
-      return false;
+      WB.session.memOnly = true;
     }
   }
 
-  /* ------------------------------------------------------------- 实验注册 */
-  WB.registerExp = function (def) {
-    WB.exps.push(def);
-    WB.byId[def.id] = def;
-  };
-  WB.exps.sort(function (a, b) { return a.no - b.no; });
+  function saveStore() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        schema: SCHEMA,
+        version: WB.version,
+        savedAt: new Date().toISOString(),
+        evidence: WB.evidence,
+        state: WB.state,
+        quizAnswers: WB.quizAnswers
+      }));
+    } catch (e) { /* ignore quota */ }
+  }
 
-  function expState(def) {
-    if (!WB.state[def.id]) WB.state[def.id] = Q.clone(def.defaults || {});
-    var st = WB.state[def.id];
-    // 补齐新增字段（版本升级后旧存档缺字段）
-    Object.keys(def.defaults || {}).forEach(function (k) {
-      if (st[k] === undefined) st[k] = Q.clone(def.defaults[k]);
+  function clearAnim() {
+    if (WB.session.animTimer) {
+      clearInterval(WB.session.animTimer);
+      clearTimeout(WB.session.animTimer);
+      WB.session.animTimer = null;
+    }
+  }
+
+  function clone(v) { return JSON.parse(JSON.stringify(v)); }
+
+  function ensureState(exp) {
+    if (!WB.state[exp.id]) WB.state[exp.id] = clone(exp.defaults || {});
+    var st = WB.state[exp.id];
+    var def = exp.defaults || {};
+    Object.keys(def).forEach(function (k) {
+      if (st[k] === undefined) st[k] = clone(def[k]);
     });
     return st;
   }
-  WB.expState = expState;
 
-  function safeCompute(def, st) {
-    try {
-      return { ok: true, value: def.compute(st) };
-    } catch (e) {
-      return { ok: false, error: e.message, value: null };
-    }
+  function registerExp(spec) {
+    WB.exps.push(spec);
+    WB.byId[spec.id] = spec;
   }
 
-  function expStatus(def) {
-    var ev = WB.evidence[def.id];
-    if (!ev) return { kind: 'mute', text: '未记录', label: '未记录证据' };
-    if (ev.status === 'pass') return { kind: 'pass', text: '已达成', label: '已记录：达成' };
-    if (ev.status === 'warn') return { kind: 'warn', text: '待改进', label: '已记录：待改进' };
-    return { kind: 'fail', text: '未通过', label: '已记录：未通过' };
+  /* ------------------------------------------------------------------ Toast 提示 */
+  function toast(msg, tone) {
+    var host = document.getElementById('toast-host');
+    if (!host) return;
+    var el = document.createElement('div');
+    el.className = 'toast' + (tone ? ' ' + tone : '');
+    el.textContent = msg;
+    host.appendChild(el);
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 2500);
   }
+  WB.toast = toast;
+  WB.save = saveStore;
 
-  /* --------------------------------------------------------------- 导航 */
-  var NAV = [
-    { group: '课程', items: [
-      { id: 'overview', label: '课程概览', icon: '◇' },
-      { id: 'graph', label: '知识图谱', icon: '⌘' },
-      { id: 'quiz', label: '随堂题库', icon: '✦' }
-    ] },
-    { group: '实验', items: [] },
-    { group: '质量', items: [
-      { id: 'evidence', label: '证据与报告', icon: '▤' },
-      { id: 'about', label: '课程地图', icon: 'ⓘ' }
-    ] }
-  ];
-
-  var EXP_HOOKS = {
-    m1: '工具规则扫不出的缺陷，如何靠人工走查提前拦下？',
-    m2: '等价类覆盖率 100% 时，为什么仍有漏网之鱼？',
-    m3: '边界值只差 ±1 步，哪些故障能命中、哪些碰不到？',
-    m4: '多条件交织的资格规则，怎样查出遗漏与冲突？',
-    m5: '除正常主流程外，非法操作与守卫分支该如何验证？',
-    m6: '语句 100% 覆盖后，判定与条件覆盖还差多少？',
-    m7: 'CI 门禁为何不能只看通过率，而要设一票否决？',
-    m8: '实验证据不足时，量化门禁为什么会直接亮红灯？'
+  WB.record = function (expId, evObj) {
+    if (!expId) return;
+    WB.evidence[expId] = evObj;
+    saveStore();
+    refreshNav();
   };
 
-  function quizState() {
-    if (!WB.session.quiz || typeof WB.session.quiz !== 'object') {
-      WB.session.quiz = { answers: {}, drafts: {}, topic: 'all', diff: 'all', type: 'all', wrongOnly: false, expandAll: false, examIds: null };
-    }
-    var qz = WB.session.quiz;
-    if (!qz.answers || typeof qz.answers !== 'object') qz.answers = {};
-    if (!qz.drafts || typeof qz.drafts !== 'object') qz.drafts = {};
-    if (!qz.topic) qz.topic = 'all';
-    if (!qz.diff) qz.diff = 'all';
-    if (!qz.type) qz.type = 'all';
-    return qz;
-  }
-
-  function expTabOf(id) {
-    if (!WB.session.expTabs || typeof WB.session.expTabs !== 'object') WB.session.expTabs = {};
-    return WB.session.expTabs[id] || 'lab';
-  }
-
-  function buildRail() {
-    var nav = document.getElementById('rail-nav');
-    var qSt = Q.quizStats(quizState().answers);
-    var html = '';
-    NAV.forEach(function (g) {
-      html += '<div class="rail-group"><div class="rail-group-h">' + E(g.group) + '</div>';
-      var items = g.items.slice();
-      if (g.group === '实验') {
-        items = WB.exps.map(function (d) {
-          var s = expStatus(d);
-          return { id: 'exp/' + d.id, label: d.navLabel || d.title, no: d.no, tag: s.text, tagCls: s.kind === 'pass' ? 'done' : s.kind === 'warn' ? 'warn' : '' };
-        });
-      }
-      items.forEach(function (it) {
-        var tag = it.tag;
-        var tagCls = it.tagCls || '';
-        if (it.id === 'quiz') {
-          tag = qSt.answered + '/' + qSt.total;
-          tagCls = qSt.answered > 0 && qSt.accuracy >= 80 ? 'done' : '';
-        }
-        html += '<button class="rail-item" data-nav="' + E(it.id) + '">' +
-          (it.no ? '<span class="idx">M' + it.no + '</span>' : '<span class="idx">' + (it.icon || '·') + '</span>') +
-          '<span class="lbl">' + E(it.label) + '</span>' +
-          (tag ? '<span class="tag ' + tagCls + '">' + E(tag) + '</span>' : '') +
-          '</button>';
-      });
-      html += '</div>';
-    });
-    nav.innerHTML = html;
-  }
-
-  function markRail(view) {
-    Array.prototype.forEach.call(document.querySelectorAll('[data-nav]'), function (b) {
-      b.classList.toggle('on', b.getAttribute('data-nav') === view);
-    });
-  }
-
-  /* --------------------------------------------------------------- 路由 */
+  /* ------------------------------------------------------------------ 路由 */
   function parseHash() {
-    var h = (location.hash || '#/overview').replace(/^#\/?/, '');
-    var parts = h.split('/').filter(Boolean);
-    if (!parts.length) return { view: 'overview' };
-    if (parts[0] === 'exp' && parts[1]) return { view: 'exp', id: parts[1] };
-    return { view: parts[0] };
+    var h = (location.hash || '').replace(/^#\/?/, '');
+    if (!h || h === 'overview') return { view: 'overview', id: null };
+    if (h === 'graph') return { view: 'graph', id: null };
+    if (h === 'quiz') return { view: 'quiz', id: null };
+    if (h === 'evidence') return { view: 'evidence', id: null };
+    if (h === 'about') return { view: 'about', id: null };
+    var m = h.match(/^exp\/(m[1-8])$/);
+    if (m) return { view: 'exp', id: m[1] };
+    return { view: 'overview', id: null };
   }
 
-  WB.go = function (view) {
-    var target = '#/' + view;
-    if (location.hash === target) { render(); return; }
-    location.hash = target;
-  };
-
-  function render() {
-    var r = parseHash();
-    var view = r.view;
-    if (view === 'exp' && !WB.byId[r.id]) view = 'overview';
-    buildRail();
-    markRail(view === 'exp' ? 'exp/' + r.id : view);
-
-    var host = document.getElementById('view');
-    host.className = 'view';
-    if (view === 'exp') {
-      var tab = expTabOf(r.id);
-      if (tab === 'lab') host.classList.add('lock');
-      renderExpPage(host, r.id);
-    } else if (view === 'graph') {
-      renderGraphPage(host, r.node);
-    } else if (view === 'quiz') {
-      renderQuizPage(host);
-    } else if (view === 'evidence') {
-      renderEvidencePage(host);
-    } else if (view === 'about') {
-      renderAboutPage(host);
-    } else {
-      renderOverview(host);
-    }
-    renderTopbar(view, r.id);
-    host.scrollTop = 0;
+  function go(route) {
+    var target = '#/' + route.replace(/^#?\/?/, '');
+    if (location.hash === target) render();
+    else location.hash = target;
   }
+  WB.go = go;
 
-  function rerenderKeepScroll() {
-    var host = document.getElementById('view');
-    var scroller = host ? (host.querySelector('.exp-panel-scroll') || host) : null;
-    var top = scroller ? scroller.scrollTop : 0;
-    render();
-    var scroller2 = host ? (host.querySelector('.exp-panel-scroll') || host) : null;
-    if (scroller2) scroller2.scrollTop = top;
-  }
-
-  function renderTopbar(view, id) {
-    var c = document.getElementById('crumb');
-    var def = id ? WB.byId[id] : null;
-    var html = '';
-    if (view === 'exp' && def) {
-      html = '<button class="link" data-nav="overview">课程概览</button><span class="sep">/</span>' +
-        '<button class="link" data-nav="graph">知识图谱</button><span class="sep">/</span>' +
-        '<b>M' + def.no + ' ' + E(def.title) + '</b>';
-    } else {
-      var map = { overview: '课程概览', graph: '知识图谱', quiz: '随堂题库', evidence: '证据与报告', about: '课程地图' };
-      html = '<b>' + E(map[view] || '课程概览') + '</b>';
-    }
-    c.innerHTML = html;
-
-    var total = WB.exps.length;
-    var done = WB.exps.filter(function (d) { return WB.evidence[d.id]; }).length;
-    var passed = WB.exps.filter(function (d) { return WB.evidence[d.id] && WB.evidence[d.id].status === 'pass'; }).length;
-    var qSt = Q.quizStats(quizState().answers);
-    document.getElementById('stat').innerHTML =
-      '<span>证据 <b>' + done + '/' + total + '</b></span>' +
-      '<span class="sep" style="color:var(--ink-4)">·</span>' +
-      '<span>达成 <b>' + passed + '</b></span>' +
-      '<span class="sep" style="color:var(--ink-4)">·</span>' +
-      '<span>自测 <b>' + qSt.answered + '/' + qSt.total + '</b></span>';
-  }
-
-  /* --------------------------------------------------------- 实验页渲染 */
-  function renderExpPage(host, id) {
-    var def = WB.byId[id];
-    var st = expState(def);
-    var res = safeCompute(def, st);
-    var tab = expTabOf(id);
-    var expQs = Q.quizByExp(def.id);
-    var qSt = Q.quizStats(quizState().answers, expQs);
-
-    var head = '<header class="exp-head">' +
-      '<div class="exp-head-main">' +
-      '<div class="exp-no">M' + def.no + '</div>' +
-      '<div class="exp-title-wrap">' +
-      '<div class="exp-title-row"><h1>' + E(def.title) + '</h1><span class="chapter-tag">' + E(def.chapter) + '</span></div>' +
-      '<div class="exp-sub">' + E(def.subtitle) + '</div>' +
-      '</div></div>' +
-      '<div class="exp-meta">' +
-      '<div class="seg-tabs" role="tablist" aria-label="实验视图切换">' +
-      '<button type="button" role="tab" aria-selected="' + (tab === 'lab') + '" class="' + (tab === 'lab' ? 'on' : '') + '" data-act="exp-tab" data-arg="lab">交互实验</button>' +
-      '<button type="button" role="tab" aria-selected="' + (tab === 'quiz') + '" class="' + (tab === 'quiz' ? 'on' : '') + '" data-act="exp-tab" data-arg="quiz">随堂自测 <span class="tab-cnt">' + qSt.answered + '/' + qSt.total + '</span></button>' +
-      '<button type="button" role="tab" aria-selected="' + (tab === 'theory') + '" class="' + (tab === 'theory' ? 'on' : '') + '" data-act="exp-tab" data-arg="theory">原理与误区</button>' +
+  /* ------------------------------------------------------------------ 顶部外壳 & 胶囊导航 */
+  function buildHeader() {
+    return '<header class="app-header">' +
+      '<div class="header-inner">' +
+        '<div class="brand-block">' +
+          '<button type="button" class="brand-badge" data-nav="overview" aria-label="返回青蓝 QA Lab 首页">🛡️</button>' +
+          '<div>' +
+            '<div class="brand-name-row">' +
+              '<h1 class="brand-name">青蓝 QA Lab</h1>' +
+              '<span class="team-pill">🚩 泰山新松队</span>' +
+            '</div>' +
+            '<div class="brand-sub">零门槛软件测试交互游乐场 · 点一点看懂抓虫与门禁</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="header-actions">' +
+          '<span id="stat" class="stat-pill">档案 0/8 · 答题 0/48</span>' +
+          '<button type="button" class="hdr-btn" data-act="help">🧭 新手引导</button>' +
+          '<button type="button" class="hdr-btn" data-act="export-all">📤 导出档案</button>' +
+          '<button type="button" class="hdr-btn" data-act="import-all">📥 导入</button>' +
+          '<input type="file" id="import-file" accept=".json" hidden>' +
+        '</div>' +
       '</div>' +
-      '<div class="exp-head-acts">' +
-      '<button class="btn sm ghost" data-act="export-exp">导出</button>' +
-      '<button class="btn sm ghost" data-act="reset-exp">重置</button>' +
-      '</div></div></header>';
-
-    if (tab === 'quiz') {
-      host.innerHTML = '<div class="exp exp-subview">' + head +
-        '<div class="exp-panel-scroll">' + renderExpQuizPanel(def, expQs, qSt) + '</div></div>';
-      return;
-    }
-
-    if (tab === 'theory') {
-      host.innerHTML = '<div class="exp exp-subview">' + head +
-        '<div class="exp-panel-scroll">' + renderExpTheoryPanel(def) + '</div></div>';
-      return;
-    }
-
-    var focusStrip = '<div class="focus-strip">' +
-      '<div class="fs-k">本实验核心探究</div>' +
-      '<div class="fs-q">' + E(EXP_HOOKS[def.id] || def.goals[0]) + '</div>' +
-      '<button type="button" class="link tiny mt6" data-act="exp-tab" data-arg="theory">查看目标与公式 →</button>' +
-      '</div>';
-
-    var left = '<aside class="col-left">' + focusStrip + paramsHtml(def, st) + '</aside>';
-    var right = '<div class="col-right" id="col-right">' + rightHtml(def, st, res) + '</div>';
-
-    host.innerHTML = '<div class="exp">' + head + '<div class="exp-cols">' + left + right + '</div></div>';
-    bindParams();
+    '</header>';
   }
 
-  function renderExpTheoryPanel(def) {
-    var html = '<div class="grid g2">';
-    html += '<section class="card"><h3 class="card-h">学习目标<span class="card-hint">约 ' + def.minutes + ' 分钟</span></h3><div class="card-b">' +
-      '<ul class="goal-list">' + def.goals.map(function (g) {
-        return '<li><b>✓</b><span>' + E(g) + '</span></li>';
-      }).join('') + '</ul>' +
-      '<div class="divider"></div>' +
-      '<div class="theory-note">' +
-      '<p><b>前置知识：</b>' + E(def.prereq) + '</p>' +
-      '<p class="mt6"><b>适用场景：</b>' + E(def.scopeNote) + '</p>' +
-      '</div></div></section>';
-
-    html += '<section class="card"><h3 class="card-h">常见认知误区<span class="card-hint">' + def.blockers.length + ' 条辨析</span></h3><div class="card-b">' +
-      def.blockers.map(function (b) {
-        return '<div class="blocker"><b>' + E(b[0]) + '</b><span>' + E(b[1]) + '</span></div>';
-      }).join('') + '</div></section>';
-    html += '</div>';
-
-    html += '<section class="card mt14"><h3 class="card-h">核心理论与度量公式</h3><div class="card-b"><div class="theory-note">' + def.theory + '</div></div></section>';
-    html += '<div class="btn-row mt14"><button class="btn primary" data-act="exp-tab" data-arg="lab">回到交互实验</button>' +
-      '<button class="btn" data-act="exp-tab" data-arg="quiz">去做本节自测 →</button></div>';
-    return html;
-  }
-
-  function renderExpQuizPanel(def, expQs, qSt) {
-    var acc = qSt.accuracy == null ? null : qSt.accuracy;
-    var hdr = '<section class="card quiz-banner"><div class="card-b row wrap" style="justify-content:space-between;gap:14px">' +
-      '<div class="row" style="gap:14px">' +
-      Q.ring(acc, { size: 54, text: acc == null ? '—' : Math.round(acc) + '%', color: acc >= 75 ? '#059669' : '#0066cc' }) +
-      '<div><div style="font-weight:650;font-size:15px">M' + def.no + ' 随堂自测（' + qSt.answered + '/' + qSt.total + ' 题已作答）</div>' +
-      '<div class="tiny muted mt2">围绕「' + E(def.title) + '」精选 ' + qSt.total + ' 道单选、多选与填空题，作答后即可查看逐项剖析。</div></div></div>' +
-      '<div class="btn-row">' +
-      '<button class="btn sm" data-act="exp-tab" data-arg="lab">返回实验面板</button>' +
-      '<button class="btn sm ghost" data-nav="quiz">进入 ' + Q.QUIZ_QUESTIONS.length + ' 题综合题库 →</button>' +
-      '</div></div></section>';
-    return hdr + '<div class="mt12">' + renderQuizList(expQs, { showExpLink: false }) + '</div>';
-  }
-
-  function escInline(s) {
-    return E(s).replace(/`([^`]+)`/g, '<code class="q-code">$1</code>');
-  }
-
-  function renderQuizList(questions, opts) {
-    opts = opts || {};
-    var qz = quizState();
-    var ans = qz.answers;
-    var drafts = qz.drafts;
-    if (!questions.length) {
-      return '<section class="card"><div class="card-b">' + Q.empty('当前筛选条件下暂无匹配题目。') + '</div></section>';
-    }
-    var letters = ['A', 'B', 'C', 'D', 'E'];
-    var typeLabel = { single: '单选题', multi: '多选题', fill: '填空题' };
-    return '<div class="quiz-list">' + questions.map(function (q, idx) {
-      var qtype = q.type || 'single';
-      var pick = ans[q.id];
-      var done = Q.quizIsAnswered(q, pick);
-      var ok = done && Q.quizCheck(q, pick);
-      var statusBadge = !done ? '<span class="chip">未作答</span>'
-        : ok ? Q.badge('pass', '回答正确') : Q.badge('fail', '再思考');
-      var diffCls = q.diff === '综合' ? 'qdiff-adv' : q.diff === '进阶' ? 'qdiff-mid' : 'qdiff-base';
-      var expDef = q.exp ? WB.byId[q.exp] : null;
-
-      var body = '<div class="q-stem"><span class="q-idx">' + (idx + 1) + '.</span> ' + escInline(q.stem) + '</div>';
-
-      if (qtype === 'single') {
-        body += '<div class="q-opts">' +
-          q.options.map(function (opt, oi) {
-            var cls = 'q-opt';
-            if (done) {
-              if (oi === q.answer) cls += ' opt-right';
-              else if (oi === pick) cls += ' opt-wrong';
-              else cls += ' opt-dim';
-            }
-            return '<button type="button" class="' + cls + '" data-act="quiz-pick" data-arg="' + E(q.id) + ':' + oi + '">' +
-              '<span class="q-letter">' + letters[oi] + '</span>' +
-              '<span class="q-otext">' + escInline(opt) + '</span></button>';
-          }).join('') +
-          '</div>';
-      } else if (qtype === 'multi') {
-        var curDraft = Array.isArray(drafts[q.id]) ? drafts[q.id] : [];
-        var pickedList = done ? (Array.isArray(pick) ? pick : []) : curDraft;
-        var rightSet = {};
-        (q.answer || []).forEach(function (i) { rightSet[i] = true; });
-        body += '<div class="q-opts">' +
-          q.options.map(function (opt, oi) {
-            var isPicked = pickedList.indexOf(oi) >= 0;
-            var isRight = !!rightSet[oi];
-            var cls = 'q-opt q-opt-multi';
-            if (!done) {
-              if (isPicked) cls += ' opt-picked';
-            } else {
-              if (isRight && isPicked) cls += ' opt-right';
-              else if (isRight && !isPicked) cls += ' opt-miss';
-              else if (!isRight && isPicked) cls += ' opt-wrong';
-              else cls += ' opt-dim';
-            }
-            return '<button type="button" class="' + cls + '" data-act="quiz-toggle" data-arg="' + E(q.id) + ':' + oi + '"' +
-              (done ? ' disabled' : '') + '>' +
-              '<span class="q-letter q-chk">' + (isPicked ? '✓' : letters[oi]) + '</span>' +
-              '<span class="q-otext">' + escInline(opt) + (done && isRight && !isPicked ? ' <span class="q-miss-tag">漏选</span>' : '') + '</span></button>';
-          }).join('') +
-          '</div>';
-        if (!done) {
-          body += '<div class="q-actbar">' +
-            '<span class="tiny muted">已勾选 ' + curDraft.length + ' 项（支持多个答案）</span>' +
-            '<button type="button" class="btn primary sm" data-act="quiz-submit-multi" data-arg="' + E(q.id) + '"' +
-            (curDraft.length ? '' : ' disabled') + '>提交多选</button>' +
-            '</div>';
-        }
-      } else {
-        var fillVal = done ? String(pick) : String(drafts[q.id] || '');
-        body += '<div class="q-fill-box">' +
-          '<input type="text" class="q-fill-inp" data-fill-qid="' + E(q.id) + '" value="' + E(fillVal) + '" placeholder="' +
-          E(q.placeholder || '请输入答案，按回车或点提交') + '"' + (done ? ' disabled' : '') + '>' +
-          (done ? '' : '<button type="button" class="btn primary sm" data-act="quiz-submit-fill" data-arg="' + E(q.id) + '">提交答案</button>') +
-          '</div>';
-      }
-
-      if (done) {
-        var ansLabel = Q.quizFormatAnswer(q);
-        var expHtml = '<div class="q-explain ' + (ok ? 'ok' : 'bad') + '">' +
-          '<div class="qe-head"><b>' + (ok ? '✓ 解析确认' : '参考答案：' + E(ansLabel)) + '</b>' +
-          '<button type="button" class="link tiny" data-act="quiz-clear-one" data-arg="' + E(q.id) + '">重做本题</button></div>' +
-          '<p class="qe-sum">' + escInline(q.explain) + '</p>';
-        if (Array.isArray(q.optionNotes) && q.optionNotes.length) {
-          var rightMap = {};
-          if (qtype === 'multi') (q.answer || []).forEach(function (i) { rightMap[i] = true; });
-          else rightMap[q.answer] = true;
-          expHtml += '<div class="qe-breakdown"><div class="qe-sub">逐项剖析</div><ul class="qe-opts">' +
-            q.optionNotes.map(function (note, oi) {
-              var isOkOpt = !!rightMap[oi];
-              return '<li class="' + (isOkOpt ? 'is-r' : 'is-w') + '">' +
-                '<span class="qe-opt-tag">' + letters[oi] + ' · ' + (isOkOpt ? '对' : '错') + '</span>' +
-                '<span>' + escInline(note) + '</span></li>';
-            }).join('') +
-            '</ul></div>';
-        }
-        expHtml += '</div>';
-        body += expHtml;
-      }
-
-      return '<article class="card qcard ' + (done ? (ok ? 'is-ok' : 'is-bad') : '') + '" data-qid="' + E(q.id) + '">' +
-        '<div class="qcard-h">' +
-        '<div class="row wrap" style="gap:7px">' +
-        '<span class="q-id">' + E(q.id) + '</span>' +
-        '<span class="q-type qt-' + qtype + '">' + (typeLabel[qtype] || '单选') + '</span>' +
-        '<span class="q-diff ' + diffCls + '">' + E(q.diff) + '</span>' +
-        '<span class="chapter-tag">' + E(q.chapter) + '</span>' +
-        '</div>' +
-        '<div class="row" style="gap:8px">' +
-        (opts.showExpLink && expDef ? '<button type="button" class="link tiny" data-nav="exp/' + E(expDef.id) + '">关联 M' + expDef.no + ' →</button>' : '') +
-        statusBadge +
-        '</div></div>' +
-        '<div class="qcard-b">' + body + '</div></article>';
-    }).join('') + '</div>';
-  }
-
-  /* 参数控件渲染 */
-  function paramsHtml(def, st) {
-    var body = '';
-    var groups = [];
-    def.params.forEach(function (p) {
-      var g = p.group || '';
-      var last = groups[groups.length - 1];
-      if (!last || last.name !== g) groups.push({ name: g, items: [p] });
-      else last.items.push(p);
-    });
-
-    groups.forEach(function (grp) {
-      if (grp.name) {
-        body += '<details class="sec pgroup"><summary><span>' + E(grp.name) + '</span><em>' + grp.items.length + ' 项</em></summary><div class="sec-b">';
-      }
-      grp.items.forEach(function (p) {
-      var v = st[p.key];
-      body += '<div class="field">';
-      if (p.type === 'select') {
-        body += '<label for="p-' + def.id + '-' + p.key + '">' + E(p.label) + '</label>' +
-          '<select id="p-' + def.id + '-' + p.key + '" data-p="' + E(p.key) + '">' +
-          p.options.map(function (o) {
-            return '<option value="' + E(o.v) + '"' + (String(o.v) === String(v) ? ' selected' : '') + '>' + E(o.l) + '</option>';
-          }).join('') + '</select>';
-      } else if (p.type === 'seg') {
-        body += '<span class="field-label">' + E(p.label) + '</span><div class="seg">' +
-          p.options.map(function (o) {
-            return '<button type="button" data-seg="' + E(p.key) + '" data-val="' + E(o.v) + '"' +
-              (String(o.v) === String(v) ? ' class="on"' : '') + '>' + E(o.l) + '</button>';
-          }).join('') + '</div>';
-      } else if (p.type === 'range') {
-        body += '<label for="p-' + def.id + '-' + p.key + '">' + E(p.label) + '</label>' +
-          '<div class="range-row"><input id="p-' + def.id + '-' + p.key + '" type="range" data-p="' + E(p.key) + '"' +
-          ' min="' + p.min + '" max="' + p.max + '" step="' + (p.step || 1) + '" value="' + v + '">' +
-          '<output data-out="' + E(p.key) + '">' + (p.fmt ? p.fmt(v) : v) + '</output></div>';
-      } else if (p.type === 'number') {
-        body += '<label for="p-' + def.id + '-' + p.key + '">' + E(p.label) + '</label>' +
-          '<input id="p-' + def.id + '-' + p.key + '" type="number" data-p="' + E(p.key) + '" value="' + v + '"' +
-          (p.min !== undefined ? ' min="' + p.min + '"' : '') + (p.max !== undefined ? ' max="' + p.max + '"' : '') +
-          (p.step !== undefined ? ' step="' + p.step + '"' : '') + '>';
-      } else if (p.type === 'text') {
-        body += '<label for="p-' + def.id + '-' + p.key + '">' + E(p.label) + '</label>' +
-          '<input id="p-' + def.id + '-' + p.key + '" type="text" data-p="' + E(p.key) + '" value="' + E(v) + '" maxlength="' + (p.maxlen || 24) + '">';
-      } else if (p.type === 'check') {
-        body += '<label class="check"><input type="checkbox" data-p="' + E(p.key) + '"' + (v ? ' checked' : '') + '>' +
-          '<span>' + E(p.label) + (p.sub ? '<span class="ck-sub">' + E(p.sub) + '</span>' : '') + '</span></label>';
-      } else if (p.type === 'checks') {
-        body += '<span class="field-label">' + E(p.label) + '</span>';
-        if (p.cols === 2) body += '<div class="checks2">';
-        body += p.options.map(function (o) {
-          var on = (v || []).indexOf(o.v) >= 0;
-          return '<label class="check"><input type="checkbox" data-p="' + E(p.key) + '" data-multi="1" value="' + E(o.v) + '"' +
-            (on ? ' checked' : '') + '><span>' + E(o.l) + (o.s ? '<span class="ck-sub">' + E(o.s) + '</span>' : '') + '</span></label>';
-        }).join('');
-        if (p.cols === 2) body += '</div>';
-      }
-        if (p.hint) body += '<div class="hint">' + p.hint + '</div>';
-        body += '</div>';
-      });
-      if (grp.name) body += '</div></details>';
-    });
-
-    return '<section class="card"><h3 class="card-h">参数调节区<span class="card-hint">' + def.params.length + ' 项</span></h3>' +
-      '<div class="card-b">' + body + '</div></section>';
-  }
-
-  function rightHtml(def, st, res) {
-    if (!res.ok) {
-      return Q.card('计算出错', '<div class="callout fail"><b>实验计算抛出异常：</b>' + E(res.error) +
-        '<p class="mt6">请调整参数后重试。该异常已被捕获，不会影响其他实验。</p></div>');
-    }
-    var html = '';
-    if (st.__dirty && def.needsRun) {
-      html += '<div class="callout warn"><b>参数已变更，下方结果已失效。</b>' +
-        '<p>当前展示的是上一次执行的结果，请点击“执行”重新计算后再下结论。</p></div>';
-    }
-    html += def.viz(res.value, st);
-    html += def.verify(res.value, st);
-    html += evidenceBar(def, res.value, st);
-    return html;
-  }
-
-  function evidenceBar(def, res, st) {
-    var info = null;
-    try { info = def.evidence(res, st); } catch (e) { info = null; }
-    var recorded = WB.evidence[def.id];
-    var body = '';
-    if (!info) {
-      body = '<p class="muted">本实验未定义证据采集规则。</p>';
-    } else if (info.disabled) {
-      body = '<p class="muted">' + E(info.note || '尚未产生可记录的结论。') + ' 请先完成本实验的核心操作。</p>';
-    } else {
-      body += '<div class="row wrap mb6">' +
-        Q.badge(info.status, info.status === 'pass' ? '当前结果达到达成条件' : info.status === 'warn' ? '当前结果存在待改进项' : '当前结果未达达成条件') +
-        '<span class="tiny muted">主指标：' + E(info.label) + ' = ' + (info.coverage === null || info.coverage === undefined ? '—' : Q.num(info.coverage, 1) + '%') + '</span>' +
-        '</div>';
-      if (info.note) body += '<p class="tiny muted mb6">' + E(info.note) + '</p>';
-      body += '<div class="btn-row"><button class="btn primary sm" data-act="record-evidence">记录本次结果到证据库</button>' +
-        (recorded ? '<span class="tiny muted">上次记录：' + E(recorded.at || '—') + '</span>' : '<span class="tiny muted">尚未记录</span>') +
-        '</div>';
-    }
-    return '<section class="card"><h3 class="card-h">证据与结论沉淀</h3><div class="card-b">' + body + '</div></section>';
-  }
-
-  /* --------------------------------------------------------- 参数事件绑定 */
-  function bindParams() {
-    var left = document.querySelector('.col-left');
-    if (!left) return;
-    left.addEventListener('change', function (ev) {
-      var el = ev.target;
-      if (el.hasAttribute && el.hasAttribute('data-p')) {
-        var k = applyControl(el);
-        afterParamChange(k);
-      }
-    });
-    left.addEventListener('input', function (ev) {
-      var el = ev.target;
-      if (el.type === 'range' && el.hasAttribute('data-p')) {
-        var out = left.querySelector('[data-out="' + el.getAttribute('data-p') + '"]');
-        if (out) {
-          var p = currentDef().params.filter(function (x) { return x.key === el.getAttribute('data-p'); })[0];
-          out.value = p && p.fmt ? p.fmt(Number(el.value)) : el.value;
-          out.textContent = p && p.fmt ? p.fmt(Number(el.value)) : el.value;
-        }
-        var kk = applyControl(el);
-        afterParamChange(kk);
-      }
-    });
-  }
-
-  function currentDef() {
-    var r = parseHash();
-    return r.view === 'exp' ? WB.byId[r.id] : null;
-  }
-
-  function applyControl(el) {
-    var def = currentDef();
-    if (!def) return null;
-    var st = expState(def);
-    var key = el.getAttribute('data-p');
-    if (!key) return null;
-    if (el.type === 'checkbox' && el.getAttribute('data-multi') === '1') {
-      var all = document.querySelectorAll('[data-p="' + key + '"][data-multi="1"]');
-      var vals = [];
-      Array.prototype.forEach.call(all, function (x) { if (x.checked) vals.push(x.value); });
-      st[key] = vals;
-    } else if (el.type === 'checkbox') {
-      st[key] = el.checked;
-    } else if (el.type === 'range') {
-      var n = Number(el.value);
-      st[key] = isFinite(n) ? n : 0;
-    } else if (el.type === 'number') {
-      // 留空时置为 null，让各实验能区分“填了 0”和“没填”
-      if (el.value === '' || !isFinite(Number(el.value))) st[key] = null;
-      else st[key] = Number(el.value);
-    } else {
-      st[key] = el.value;
-    }
-    return key;
-  }
-
-  function afterParamChange(key) {
-    var def = currentDef();
-    if (!def) return;
-    var st = expState(def);
-    if (def.onParam) {
-      try { def.onParam(key, st); } catch (e) { /* 参数联动失败不应中断渲染 */ }
-    }
-    if (def.needsRun) st.__dirty = true;
-    persist();
-    var col = document.getElementById('col-right');
-    if (!col) return;
-    var top = col.scrollTop;
-    var res = safeCompute(def, st);
-    col.innerHTML = rightHtml(def, st, res);
-    col.scrollTop = top;
-  }
-
-  /* 右栏内的输入控件（如自定义用例表单）只更新状态，不触发整块重绘，避免打断输入 */
-  document.addEventListener('change', function (ev) {
-    var el = ev.target;
-    if (!el || !el.getAttribute || !el.hasAttribute('data-p')) return;
-    if (!el.closest || !el.closest('#col-right')) return;
-    if (applyControl(el)) persist();
-  });
-
-  /* 填空题输入草稿实时保存 + 回车直接提交 */
-  document.addEventListener('input', function (ev) {
-    var el = ev.target;
-    if (!el || !el.getAttribute) return;
-    var qid = el.getAttribute('data-fill-qid');
-    if (!qid) return;
-    quizState().drafts[qid] = el.value;
-    persist();
-  });
-
-  document.addEventListener('keydown', function (ev) {
-    var el = ev.target;
-    if (ev.key === 'Enter' && el && el.getAttribute && el.hasAttribute('data-fill-qid')) {
-      ev.preventDefault();
-      handleAction('quiz-submit-fill', el.getAttribute('data-fill-qid'), el, ev);
-      return;
-    }
-    if (ev.key !== 'Enter' && ev.key !== ' ') return;
-    if (!el || !el.getAttribute) return;
-    if (el.tagName === 'BUTTON' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') return;
-    if (!el.hasAttribute('data-act')) return;
-    ev.preventDefault();
-    handleAction(el.getAttribute('data-act'), el.getAttribute('data-arg'), el, ev);
-  });
-
-  /* ------------------------------------------------------------- 动作派发 */
-  document.addEventListener('click', function (ev) {
-    var t = ev.target.closest ? ev.target.closest('[data-nav]') : null;
-    if (t) {
-      ev.preventDefault();
-      WB.go(t.getAttribute('data-nav'));
-      return;
-    }
-    var seg = ev.target.closest ? ev.target.closest('[data-seg]') : null;
-    if (seg) {
-      var def = currentDef();
-      if (!def) return;
-      var st = expState(def);
-      st[seg.getAttribute('data-seg')] = seg.getAttribute('data-val');
-      if (def.needsRun) st.__dirty = true;
-      persist();
-      render();
-      return;
-    }
-    var act = ev.target.closest ? ev.target.closest('[data-act]') : null;
-    if (!act) return;
-    var name = act.getAttribute('data-act');
-    var arg = act.getAttribute('data-arg');
-    handleAction(name, arg, act, ev);
-  });
-
-  function handleAction(name, arg, el, ev) {
-    var def = currentDef();
-    var st = def ? expState(def) : null;
-
-    if (name === 'reset-exp' && def) {
-      if (!confirm('将清空「M' + def.no + ' ' + def.title + '」的参数与操作记录（其他实验不受影响）。继续？')) return;
-      WB.state[def.id] = Q.clone(def.defaults || {});
-      persist();
-      render();
-      toast('已重置本实验');
-      return;
-    }
-    if (name === 'export-exp' && def) {
-      var res = safeCompute(def, st);
-      var payload = {
-        schema: WB.schema, kind: 'experiment-record', exportedAt: new Date().toISOString(),
-        experiment: { id: def.id, no: def.no, title: def.title, chapter: def.chapter },
-        state: Q.clone(st),
-        result: res.ok ? res.value : { error: res.error },
-        evidence: WB.evidence[def.id] || null
-      };
-      download('qlab-' + def.id + '-record.json', JSON.stringify(payload, jsonSafe, 2), 'application/json');
-      return;
-    }
-    if (name === 'record-evidence' && def) {
-      var r = safeCompute(def, st);
-      if (!r.ok) { toast('计算异常，无法记录证据', 'fail'); return; }
-      var info = def.evidence(r.value, st);
-      if (!info) return;
-      WB.evidence[def.id] = {
-        status: info.status, coverage: info.coverage, label: info.label,
-        defects: info.defects || [], note: info.note || '',
-        at: new Date().toLocaleString('zh-CN', { hour12: false }),
-        exp: def.id, no: def.no, title: def.title
-      };
-      persist();
-      render();
-      toast('已记录 M' + def.no + ' 的证据');
-      return;
-    }
-    if (def && def.onAction) {
-      var handled = def.onAction(name, arg, st, el, ev);
-      if (handled) {
-        persist();
-        var col = document.getElementById('col-right');
-        if (col) {
-          var top = col.scrollTop;
-          col.innerHTML = rightHtml(def, st, safeCompute(def, st));
-          col.scrollTop = top;
-        }
-        renderTopbar('exp', def.id);
-        buildRail();
-        markRail('exp/' + def.id);
-      }
-    }
-    if (name === 'help') { openGuide(0, true); return; }
-    if (name === 'exp-tab' && def) {
-      if (!WB.session.expTabs || typeof WB.session.expTabs !== 'object') WB.session.expTabs = {};
-      WB.session.expTabs[def.id] = arg || 'lab';
-      render();
-      return;
-    }
-    if (name === 'quiz-pick') {
-      var parts = String(arg || '').split(':');
-      var qid = parts[0], optIdx = Number(parts[1]);
-      var qObj = Q.QUIZ_QUESTIONS.filter(function (x) { return x.id === qid; })[0];
-      if (!qObj || !isFinite(optIdx)) return;
-      var qz = quizState();
-      qz.answers[qid] = optIdx;
-      persist();
-      rerenderKeepScroll();
-      toast(Q.quizCheck(qObj, optIdx) ? qid + ' 回答正确' : qid + ' 已作答，对照逐项剖析看看思路', Q.quizCheck(qObj, optIdx) ? '' : 'warn');
-      return;
-    }
-    if (name === 'quiz-toggle') {
-      var tp = String(arg || '').split(':');
-      var mqid = tp[0], mIdx = Number(tp[1]);
-      var mq = Q.QUIZ_QUESTIONS.filter(function (x) { return x.id === mqid; })[0];
-      var mqz = quizState();
-      if (!mq || !isFinite(mIdx) || Q.quizIsAnswered(mq, mqz.answers[mqid])) return;
-      var dr = Array.isArray(mqz.drafts[mqid]) ? mqz.drafts[mqid].slice() : [];
-      var pos = dr.indexOf(mIdx);
-      if (pos >= 0) dr.splice(pos, 1);
-      else dr.push(mIdx);
-      dr.sort(function (a, b) { return a - b; });
-      mqz.drafts[mqid] = dr;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-submit-multi') {
-      var sq = Q.QUIZ_QUESTIONS.filter(function (x) { return x.id === arg; })[0];
-      var sqz = quizState();
-      if (!sq) return;
-      var sel = Array.isArray(sqz.drafts[sq.id]) ? sqz.drafts[sq.id].slice().sort(function (a, b) { return a - b; }) : [];
-      if (!sel.length) { toast('请先至少勾选一个选项', 'warn'); return; }
-      sqz.answers[sq.id] = sel;
-      delete sqz.drafts[sq.id];
-      persist();
-      rerenderKeepScroll();
-      toast(Q.quizCheck(sq, sel) ? sq.id + ' 多选全对' : sq.id + ' 已提交，对照逐项剖析核查漏错', Q.quizCheck(sq, sel) ? '' : 'warn');
-      return;
-    }
-    if (name === 'quiz-submit-fill') {
-      var fq = Q.QUIZ_QUESTIONS.filter(function (x) { return x.id === arg; })[0];
-      var fqz = quizState();
-      if (!fq) return;
-      var inp = document.querySelector('[data-fill-qid="' + fq.id + '"]');
-      var rawVal = inp ? inp.value : String(fqz.drafts[fq.id] || '');
-      if (!Q.quizNormalizeFill(rawVal)) { toast('请先填写答案再提交', 'warn'); return; }
-      fqz.answers[fq.id] = String(rawVal).trim();
-      delete fqz.drafts[fq.id];
-      persist();
-      rerenderKeepScroll();
-      toast(Q.quizCheck(fq, fqz.answers[fq.id]) ? fq.id + ' 填空正确' : fq.id + ' 已提交，看看推导步骤', Q.quizCheck(fq, fqz.answers[fq.id]) ? '' : 'warn');
-      return;
-    }
-    if (name === 'quiz-clear-one') {
-      var qz2 = quizState();
-      delete qz2.answers[arg];
-      delete qz2.drafts[arg];
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-topic') {
-      var qz3 = quizState();
-      qz3.topic = arg || 'all';
-      qz3.examIds = null;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-diff') {
-      var qz4 = quizState();
-      qz4.diff = arg || 'all';
-      qz4.examIds = null;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-type') {
-      var qzt = quizState();
-      qzt.type = arg || 'all';
-      qzt.examIds = null;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-expand-all') {
-      var qze = quizState();
-      qze.expandAll = !qze.expandAll;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-wrong-only') {
-      var qz5 = quizState();
-      qz5.wrongOnly = !qz5.wrongOnly;
-      qz5.examIds = null;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-exam') {
-      var qz6 = quizState();
-      qz6.examIds = Q.quizSample(Q.QUIZ_QUESTIONS, 10).map(function (q) { return q.id; });
-      qz6.wrongOnly = false;
-      persist();
-      rerenderKeepScroll();
-      toast('已生成 10 题随堂抽测卷（涵括单选、多选与填空）');
-      return;
-    }
-    if (name === 'quiz-exam-exit') {
-      var qz7 = quizState();
-      qz7.examIds = null;
-      persist();
-      rerenderKeepScroll();
-      return;
-    }
-    if (name === 'quiz-reset') {
-      if (!confirm('将清空所有随堂自测作答记录。继续？')) return;
-      quizState().answers = {};
-      quizState().drafts = {};
-      quizState().examIds = null;
-      quizState().wrongOnly = false;
-      persist();
-      render();
-      toast('已清空自测作答记录');
-      return;
-    }
-    if (name === 'export-all') { exportAll(); return; }
-    if (name === 'import-all') { importAll(); return; }
-    if (name === 'clear-all') {
-      if (!confirm('将清空全部实验参数与证据记录（不可撤销）。继续？')) return;
-      WB.evidence = {}; WB.state = {}; WB.session = {};
-      persist(); render();
-      toast('已清空全部记录');
-      return;
-    }
-    if (name === 'download-report') { downloadReport(); return; }
-    if (name === 'load-demo') {
-      if (!confirm('将写入一组示例演示证据，用于在尚未逐个完成前置实验时探索 M8 门禁模型。继续？')) return;
-      WB.evidence = Q.qaDemoEvidence();
-      Object.keys(WB.evidence).forEach(function (k) {
-        WB.evidence[k].at = '演示数据（示例）';
-        WB.evidence[k].demo = true;
-      });
-      persist(); render();
-      toast('已载入示例演示证据', 'warn', 4000);
-      return;
-    }
-  }
-  function jsonSafe(k, v) {
-    if (typeof v === 'number' && !isFinite(v)) return null;
-    return v;
-  }
-
-  /* --------------------------------------------------------- 概览页 */
-  function renderOverview(host) {
-    var done = WB.exps.filter(function (d) { return WB.evidence[d.id]; }).length;
-    var qAll = Q.quizStats(quizState().answers);
-    var evPct = Math.round((done / WB.exps.length) * 100);
-    var html = '';
-
-    var totalQ = Q.QUIZ_QUESTIONS.length;
-    var perExpQ = WB.exps.length ? Q.quizByExp(WB.exps[0].id).length : 5;
-    // Hero 焦点区：一眼看清定位、当前进度与入口
-    html += '<section class="hero-card">' +
-      '<div class="hero-copy">' +
-      '<div class="hero-eyebrow">《软件质量保证与测试》交互式实验平台</div>' +
-      '<h1 class="hero-title">青蓝 QA Lab</h1>' +
-      '<p class="hero-lead">把静态审查、等价类、边界值、状态机、白盒覆盖与 CI 门禁，做成参数一调就动的实时实验，搭配 ' + totalQ + ' 道单选、多选与填空自测题随堂验证理解。</p>' +
-      '<div class="btn-row mt14">' +
-      '<button class="btn primary lg" data-nav="exp/m2">从 M2 等价类开始实验</button>' +
-      '<button class="btn lg" data-nav="quiz">进入随堂题库（' + qAll.answered + '/' + qAll.total + '）</button>' +
-      '<button class="btn ghost lg" data-nav="graph">查看知识图谱</button>' +
-      '</div></div>' +
-      '<div class="hero-glass">' +
-      '<div class="hg-item">' + Q.ring(evPct, { size: 58, text: done + '/8', color: '#0066cc', label: '实验证据' }) +
-      '<div><div class="hg-k">实验证据沉淀</div><div class="hg-v">已记录 ' + done + ' / 8 项</div><div class="tiny muted">汇总后驱动 M8 放行门禁</div></div></div>' +
-      '<div class="hg-sep"></div>' +
-      '<div class="hg-item">' + Q.ring(qAll.progress, { size: 58, text: qAll.answered + '/' + qAll.total, color: '#0d9488', label: '随堂题库' }) +
-      '<div><div class="hg-k">随堂测验掌握</div><div class="hg-v">' + (qAll.accuracy == null ? '待作答' : '正确率 ' + qAll.accuracy + '%') + '</div><div class="tiny muted">第 1–11 章 · 单选/多选/填空</div></div></div>' +
-      '</div></section>';
-
-    // 四阶段学习路径
-    var stages = [
-      { no: '01', title: '静态防线', desc: '代码走查与规则扫描', exp: 'm1', tag: '第7章' },
-      { no: '02', title: '黑盒设计', desc: '等价类、边界、决策表、状态机', exp: 'm2', tag: '第8章上' },
-      { no: '03', title: '结构与 CI', desc: '白盒覆盖与回归流水线', exp: 'm6', tag: '第8/11章' },
-      { no: '04', title: '发布门禁', desc: '风险建模与放行判断', exp: 'm8', tag: '第1/4/9章' }
-    ];
-    html += '<div class="section-h"><h2>四步学习脉络</h2><span class="tiny muted">推荐沿 01 → 04 推进，也可按需直达</span></div>';
-    html += '<div class="grid g4">';
-    stages.forEach(function (st) {
-      html += '<button class="stage-pill" data-nav="exp/' + st.exp + '">' +
-        '<div class="row" style="justify-content:space-between"><span class="stage-no">' + st.no + '</span><span class="tiny muted">' + st.tag + '</span></div>' +
-        '<div class="stage-t">' + st.title + '</div>' +
-        '<div class="stage-d">' + st.desc + '</div></button>';
-    });
-    html += '</div>';
-
-    // 八个核心实验 Bento 网格
-    html += '<div class="section-h"><h2>八个核心实验</h2><span class="tiny muted">每个实验内置交互调参、' + perExpQ + ' 道多题型随堂测与误区辨析</span></div>';
-    html += '<div class="grid g4">';
-    WB.exps.forEach(function (d) {
-      var s = expStatus(d);
-      var qExp = Q.quizStats(quizState().answers, Q.quizByExp(d.id));
-      html += '<button class="bento-exp" data-nav="exp/' + d.id + '">' +
-        '<div class="be-top">' +
-        '<span class="be-no">M' + d.no + '</span>' +
-        '<div class="row" style="gap:5px"><span class="chip">' + qExp.correct + '/' + qExp.total + '题</span>' + Q.badge(s.kind, s.text) + '</div>' +
-        '</div>' +
-        '<div class="be-title">' + E(d.title) + '</div>' +
-        '<div class="be-hook">' + E(EXP_HOOKS[d.id] || d.subtitle) + '</div>' +
-        '<div class="be-foot"><span>' + E(d.chapter.split(' ')[0]) + '</span><span class="be-go">进入实验 →</span></div>' +
-        '</button>';
-    });
-    html += '</div>';
-
-    // 统一实训底座（紧凑胶囊卡片，去冗余文字）
-    html += '<section class="card mt14"><h3 class="card-h">共用业务场景：青蓝人才服务平台<span class="card-hint">培训报名计费与认定资格审批双主线</span></h3>' +
-      '<div class="card-b spec-strip">' +
-      '<div class="spec-col">' +
-      '<div class="spec-k">计费规则（M2 · M3 · M6 · M7）</div>' +
-      '<div class="chips mt6">' +
-      '<span class="chip">基础 120元/时 · 持证 90元</span>' +
-      '<span class="chip">团体 3–5人95折 / 6–10人9折 / 11–20人85折</span>' +
-      '<span class="chip">复训 7折（与团购不叠加，取更优）</span>' +
-      '<span class="chip">优惠券 0–500元，应付最低为 0</span>' +
-      '</div></div>' +
-      '<div class="spec-col">' +
-      '<div class="spec-k">资格与流程（M4 · M5 · M8）</div>' +
-      '<div class="chips mt6">' +
-      '<span class="chip">年龄 16–60 岁 · 大专及以上 · 工龄 ≥ 2年</span>' +
-      '<span class="chip">缺 1 项且有推荐函 → 条件通过</span>' +
-      '<span class="chip">11 状态 / 14 迁移全生命周期校验</span>' +
-      '</div></div></div></section>';
-
-    host.innerHTML = html;
-  }
-
-  /* --------------------------------------------------------- 随堂题库页 */
-  function renderQuizPage(host) {
-    var qz = quizState();
-    var allStats = Q.quizStats(qz.answers, Q.QUIZ_QUESTIONS);
-    var inExam = Array.isArray(qz.examIds) && qz.examIds.length > 0;
-    var list;
-    if (inExam) {
-      var idMap = {};
-      Q.QUIZ_QUESTIONS.forEach(function (q) { idMap[q.id] = q; });
-      list = qz.examIds.map(function (id) { return idMap[id]; }).filter(Boolean);
-    } else {
-      list = Q.quizFilter({ topic: qz.topic, diff: qz.diff, type: qz.type });
-      if (qz.wrongOnly) {
-        list = list.filter(function (q) {
-          var p = qz.answers[q.id];
-          return Q.quizIsAnswered(q, p) && !Q.quizCheck(q, p);
-        });
-      }
-    }
-    var subStats = Q.quizStats(qz.answers, list);
-    var isGrouped = !inExam && qz.topic === 'all' && qz.diff === 'all' && qz.type === 'all' && !qz.wrongOnly && !qz.expandAll;
-
-    var html = '<div class="page-h"><div><h1>随堂测验与教材题库</h1>' +
-      '<div class="sub">紧扣《软件质量保证与测试》第 1–11 章，包含单选、多选与填空三种题型，每道题均带逐项剖析与 10 题随机抽测。</div></div>' +
-      '<div class="btn-row">' +
-      (inExam
-        ? '<button class="btn primary" data-act="quiz-exam">再抽一套 10 题</button><button class="btn" data-act="quiz-exam-exit">返回题库浏览</button>'
-        : '<button class="btn primary" data-act="quiz-exam">10 题随堂抽测</button>') +
-      (!inExam && qz.topic === 'all' && qz.diff === 'all' && qz.type === 'all' && !qz.wrongOnly
-        ? '<button class="btn" data-act="quiz-expand-all">' + (qz.expandAll ? '按章节收纳' : '展开全部章节') + '</button>' : '') +
-      '<button class="btn ghost" data-act="quiz-reset">清空记录</button>' +
-      '</div></div>';
-
-    // 顶部掌握度总览条
-    html += '<section class="card quiz-banner"><div class="card-b quiz-stats-grid">' +
-      '<div class="row" style="gap:14px">' +
-      Q.ring(allStats.accuracy, { size: 58, text: allStats.accuracy == null ? '—' : Math.round(allStats.accuracy) + '%', color: allStats.accuracy >= 80 ? '#059669' : '#0066cc' }) +
-      '<div><div class="tiny muted">全库总正确率</div><div class="score-big" style="font-size:20px">' +
-      (allStats.accuracy == null ? '待作答' : allStats.accuracy + '%') + '</div></div></div>' +
-      '<div><div class="tiny muted">已作答进度</div><div class="score-big" style="font-size:20px">' + allStats.answered + ' <small>/ ' + allStats.total + ' 题</small></div></div>' +
-      '<div><div class="tiny muted">答对 / 错题</div><div class="score-big" style="font-size:20px">' +
-      '<span style="color:var(--green)">' + allStats.correct + '</span> <small>/ <span style="color:var(--red)">' + allStats.wrong + '</span></small></div></div>' +
-      '<div><div class="tiny muted">当前视图题目</div><div class="score-big" style="font-size:20px">' + list.length + ' <small>题（已答 ' + subStats.answered + '）</small></div></div>' +
-      '</div></section>';
-
-    if (!inExam) {
-      html += '<section class="card"><div class="card-b quiz-filters">';
-      html += '<div class="qf-row"><span class="qf-lbl">主题</span><div class="qf-pills">' +
-        Q.QUIZ_TOPICS.map(function (t) {
-          var sub = t.key === 'all' ? Q.QUIZ_QUESTIONS : Q.quizFilter({ topic: t.key, diff: 'all' });
-          var st = Q.quizStats(qz.answers, sub);
-          return '<button type="button" class="pill-btn' + (qz.topic === t.key ? ' on' : '') + '" data-act="quiz-topic" data-arg="' + E(t.key) + '">' +
-            E(t.label) + ' <em>' + st.correct + '/' + st.total + '</em></button>';
-        }).join('') + '</div></div>';
-      html += '<div class="qf-row"><span class="qf-lbl">题型</span><div class="qf-pills">' +
-        [
-          { k: 'all', l: '全部题型' },
-          { k: 'single', l: '单选题' },
-          { k: 'multi', l: '多选题' },
-          { k: 'fill', l: '填空题' }
-        ].map(function (tp) {
-          var cnt = tp.k === 'all' ? Q.QUIZ_QUESTIONS.length : Q.quizFilter({ type: tp.k }).length;
-          return '<button type="button" class="pill-btn' + (qz.type === tp.k ? ' on' : '') + '" data-act="quiz-type" data-arg="' + E(tp.k) + '">' +
-            E(tp.l) + ' <em>' + cnt + '</em></button>';
-        }).join('') + '</div></div>';
-      html += '<div class="qf-row"><span class="qf-lbl">难度</span><div class="qf-pills">' +
-        ['all', '基础', '进阶', '综合'].map(function (df) {
-          return '<button type="button" class="pill-btn' + (qz.diff === df ? ' on' : '') + '" data-act="quiz-diff" data-arg="' + E(df) + '">' +
-            (df === 'all' ? '全部难度' : E(df)) + '</button>';
-        }).join('') +
-        '<button type="button" class="pill-btn' + (qz.wrongOnly ? ' on warn' : '') + '" data-act="quiz-wrong-only">仅看错题（' + allStats.wrong + '）</button>' +
-        '</div></div>';
-      html += '</div></section>';
-    } else {
-      html += '<div class="callout mt10"><b>随机抽测模式：</b>当前共 ' + list.length + ' 题（覆盖第 1–11 章，含单选/多选/填空），作答后即时显示逐项剖析。</div>';
-    }
-
-    if (isGrouped) {
-      html += '<div class="quiz-groups mt12">' +
-        Q.QUIZ_TOPICS.slice(1).map(function (t, gi) {
-          var sub = Q.quizFilter({ topic: t.key });
-          var st = Q.quizStats(qz.answers, sub);
-          return '<details class="sec-card quiz-sec"' + (gi === 0 ? ' open' : '') + '>' +
-            '<summary class="sec-card-h">' +
-            '<div class="row wrap" style="gap:8px"><span class="chapter-tag">' + E(t.chapter) + '</span><b>' + E(t.label) + '</b></div>' +
-            '<div class="row" style="gap:8px"><span class="chip' + (st.answered === st.total && st.wrong === 0 && st.total > 0 ? ' on' : '') + '">' +
-            '已答 ' + st.answered + '/' + st.total + ' · 正确 ' + st.correct + '</span><span class="sec-arrow">▾</span></div>' +
-            '</summary>' +
-            '<div class="sec-card-b">' + renderQuizList(sub, { showExpLink: true }) + '</div>' +
-            '</details>';
-        }).join('') +
-        '</div>';
-    } else {
-      html += '<div class="mt12">' + renderQuizList(list, { showExpLink: true }) + '</div>';
-    }
-    host.innerHTML = html;
-  }
-
-  /* --------------------------------------------------------- 图谱页 */
-  function renderGraphPage(host, focusId) {
-    var nodes = Q.KG_NODES, edges = Q.KG_EDGES, types = Q.KG_EDGE_TYPES;
-    var active = focusId || WB.session.graphNode || 'm2';
-    var html = '<div class="page-h"><div><h1>知识图谱</h1>' +
-      '<div class="sub">悬停节点高亮关联链路，点击即可查看章节定位并一键进入对应实验。</div></div></div>';
-
-    html += '<div class="split">';
-    html += '<div class="f1"><div class="graph-wrap" id="graph-host"></div>' +
-      '<div class="row wrap mt6" style="gap:14px">' +
-      Object.keys(types).map(function (k) {
-        var t = types[k];
-        return '<span class="row" style="gap:5px;font-size:11px;color:var(--ink-3)">' +
-          '<svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + t.color +
-          '" stroke-width="2" stroke-dasharray="' + (t.dash === '0' ? 'none' : t.dash) + '"/></svg>' + t.label + '</span>';
-      }).join('') +
-      '<span class="tiny muted">虚线框 = 基础与支撑知识</span></div></div>';
-    html += '<div style="width:300px;flex:0 0 300px" id="graph-detail"></div>';
-    html += '</div>';
-
-    html += '<details class="sec-card mt14"><summary class="sec-card-h"><span>文字版知识关系（与上图等价）</span><span class="row" style="gap:8px"><span class="card-hint">' +
-      Q.KG_EDGES.length + ' 条关联边</span><span class="sec-arrow">▾</span></span></summary>' +
-      '<div class="sec-card-b flush">' + graphTextTable() + '</div></details>';
-
-    host.innerHTML = html;
-
-    Q.kgRender(document.getElementById('graph-host'), {
-      nodes: nodes, edges: edges, edgeTypes: types, active: active,
-      onSelect: function (id) { WB.session.graphNode = id; renderGraphPage(host, id); }
-    });
-    renderGraphDetail(active);
-  }
-
-  function renderGraphDetail(id) {
-    var n = Q.kgNode(id);
-    var host = document.getElementById('graph-detail');
-    if (!n || !host) return;
-    var ins = Q.KG_EDGES.filter(function (e) { return e.to === id; });
-    var outs = Q.KG_EDGES.filter(function (e) { return e.from === id; });
-    var html = '<section class="card"><h3 class="card-h">' + E(n.label) + '</h3><div class="card-b">';
-    html += '<div class="row wrap mb6"><span class="chapter-tag">' + E(n.chapter) + '</span>' +
-      (n.kind === 'exp' ? '<span class="chip">核心实验</span>' : '<span class="chip">关联知识</span>') + '</div>';
-    if (n.kind === 'exp') {
-      var d = WB.byId[n.id];
-      html += '<p class="theory-note">' + E(d.subtitle) + '</p>';
-      var s = expStatus(d);
-      html += '<div class="mt6">' + Q.badge(s.kind, s.label) + '</div>';
-      html += '<button class="btn primary sm mt10" data-nav="exp/' + n.id + '">进入实验 M' + n.no + '</button>';
-    } else {
-      html += '<p class="theory-note">该节点为课程前置与支撑知识模块，帮助衔接对应实验中的质量活动与度量指标。</p>';
-    }
-    html += '</div></section>';
-
-    if (ins.length) {
-      html += '<section class="card"><h3 class="card-h">指向本节点的关系</h3><div class="card-b">' +
-        ins.map(function (e) {
-          var t = Q.KG_EDGE_TYPES[e.type];
-          return '<div class="mb6"><span class="chip" style="color:' + t.color + '">' + t.label + '</span> ' +
-            '<b class="tiny">' + E(Q.kgNode(e.from).short) + ' → 本节点</b>' +
-            '<div class="tiny muted">' + E(e.why) + '</div></div>';
-        }).join('') + '</div></section>';
-    }
-    if (outs.length) {
-      html += '<section class="card"><h3 class="card-h">从本节点出发</h3><div class="card-b">' +
-        outs.map(function (e) {
-          var t = Q.KG_EDGE_TYPES[e.type];
-          return '<div class="mb6"><span class="chip" style="color:' + t.color + '">' + t.label + '</span> ' +
-            '<b class="tiny">本节点 → ' + E(Q.kgNode(e.to).short) + '</b>' +
-            '<div class="tiny muted">' + E(e.why) + '</div></div>';
-        }).join('') + '</div></section>';
-    }
-    host.innerHTML = html;
-  }
-
-  function graphTextTable() {
-    var rows = Q.KG_EDGES.map(function (e) {
-      var t = Q.KG_EDGE_TYPES[e.type];
-      return {
-        cells: [
-          { html: '<b>' + E(Q.kgNode(e.from).short) + '</b> → <b>' + E(Q.kgNode(e.to).short) + '</b>' },
-          { html: '<span class="chip" style="color:' + t.color + '">' + t.label + '</span>' },
-          { v: e.why }
-        ]
-      };
-    });
-    return Q.table(['关系', '类型', '为什么相连'], rows);
-  }
-
-  /* --------------------------------------------------------- 证据页 */
-  function renderEvidencePage(host) {
-    var html = '<div class="page-h"><div><h1>证据库与报告</h1>' +
-      '<div class="sub">沉淀 M1–M7 实验结论与 ' + Q.QUIZ_QUESTIONS.length + ' 题随堂测试成绩，用于 M8 发布评估与报告导出。</div></div></div>';
-
-    var rows = WB.exps.map(function (d) {
-      var ev = WB.evidence[d.id];
-      return {
-        cells: [
-          { html: '<b>M' + d.no + '</b> ' + E(d.title) },
-          { html: ev ? Q.badge(ev.status, ev.status === 'pass' ? '达成' : ev.status === 'warn' ? '待改进' : '未通过') : Q.badge('mute', '未记录') },
-          { html: ev ? '<span class="num">' + (ev.coverage === null ? '—' : Q.num(ev.coverage, 1) + '%') + '</span> <span class="tiny muted">' + E(ev.label || '') + '</span>' : '—' },
-          { html: ev ? E(ev.note || '—') : '—' },
-          { html: ev ? E(ev.at || '—') + (ev.demo ? ' <span class="chip" style="color:var(--amber)">演示</span>' : '') : '—' }
-        ]
-      };
-    });
-    html += Q.card('各实验证据（' + Object.keys(WB.evidence).length + '/' + WB.exps.length + ' 已记录）',
-      Q.table(['实验', '结论', '主指标', '说明', '记录时间'], rows), { cls: '' });
-
-    var qAll = Q.quizStats(quizState().answers);
-    var qTopicBadges = Q.QUIZ_TOPICS.slice(1).map(function (t) {
-      var st = Q.quizStats(quizState().answers, Q.quizFilter({ topic: t.key, diff: 'all' }));
-      return '<span class="chip' + (st.answered === st.total && st.wrong === 0 ? ' on' : '') + '">' +
-        E(t.label.replace(/^M\d+\s/, 'M' + (t.key.slice(1) || '') + ' ')) + ' ' + st.correct + '/' + st.total + '</span>';
-    }).join(' ');
-    html += '<section class="card mt14"><h3 class="card-h">随堂自测掌握度<span class="card-hint">已答 ' +
-      qAll.answered + ' / ' + qAll.total + ' · 正确率 ' + (qAll.accuracy == null ? '—' : qAll.accuracy + '%') + '</span></h3>' +
-      '<div class="card-b row wrap" style="justify-content:space-between;align-items:center;gap:12px">' +
-      '<div class="chips" style="flex:1;min-width:220px">' + qTopicBadges + '</div>' +
-      '<button class="btn sm" data-nav="quiz">前往题库练习</button>' +
-      '</div></section>';
-
-    html += '<div class="grid g3 mt14">';
-    html += Q.card('导出与导入', '<p class="theory-note">一键导出当前实验记录与随堂测验成绩，便于保存复盘或跨设备恢复。</p>' +
-      '<div class="btn-row mt6">' +
-      '<button class="btn" data-act="export-all">导出全部记录（JSON）</button>' +
-      '<button class="btn" data-act="download-report">导出报告（HTML）</button>' +
-      '<button class="btn" data-act="import-all">导入记录（JSON）</button>' +
-      '</div>');
-    html += Q.card('存储状态', '<p class="theory-note">' +
-      (store.ok ? '已启用本地持久存储，刷新或重新打开页面数据仍在。'
-        : '<b>本地存储不可用</b>，当前仅保存在内存中。') +
-      '</p><div class="btn-row mt6"><button class="btn" data-act="clear-all">清空全部记录</button></div>');
-    html += Q.card('发布门禁摘要', (function () {
-      var ev = Q.qaNormEvidence(WB.evidence);
-      var risk = Q.qaComputeRisk(ev, Q.QA_DEFAULT_PARAMS);
-      var g = Q.qaGate(ev, Q.QA_DEFAULT_PARAMS, risk);
-      var demoUsed = Object.keys(WB.evidence).some(function (k) { return WB.evidence[k].demo; });
-      return '<div class="row wrap mb6">' +
-        (g.passed ? Q.badge('pass', '按默认门禁参数：可发布') : Q.badge('fail', '按默认门禁参数：不可发布')) +
-        (demoUsed ? Q.badge('warn', '含演示数据') : '') + '</div>' +
-        '<p class="tiny muted">风险指数 R = ' + risk.risk + '（阈值 ' + Q.QA_DEFAULT_PARAMS.riskThreshold + '）；' +
-        '证据 ' + risk.evidencePresent + '/7；加权覆盖率 ' + risk.coverage + '%。' +
-        (risk.evidencePresent === 0 ? '<br>尚未记录实验证据，先完成实验再看放行结论。' : '') +
-        '</p>' +
-        '<button class="btn sm mt6" data-nav="exp/m8">前往 M8 调整门禁</button>';
-    })());
-    html += '</div>';
-
-    host.innerHTML = html;
-    var fileInput = document.getElementById('import-file');
-    if (fileInput) fileInput.addEventListener('change', onImportFile);
-  }
-
-  function exportAll() {
-    var payload = {
-      schema: WB.schema, kind: 'full-record', exportedAt: new Date().toISOString(),
-      app: { name: '青蓝 QA Lab', version: WB.version },
-      evidence: WB.evidence, state: WB.state, quiz: Q.clone(quizState().answers)
-    };
-    download('qlab-full-record.json', JSON.stringify(payload, jsonSafe, 2), 'application/json');
-  }
-
-  function importAll() {
-    var input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json,.json';
-    input.style.display = 'none';
-    input.id = 'import-file';
-    document.body.appendChild(input);
-    input.addEventListener('change', onImportFile);
-    input.click();
-  }
-
-  function onImportFile(ev) {
-    var f = ev.target.files && ev.target.files[0];
-    if (!f) return;
-    if (f.size > 2 * 1024 * 1024) { toast('文件过大（>2MB），已拒绝导入', 'fail'); return; }
-    var reader = new FileReader();
-    reader.onload = function () {
-      var data;
-      try { data = JSON.parse(String(reader.result)); } catch (e) { toast('JSON 解析失败，文件可能已损坏', 'fail'); return; }
-      var err = validateImport(data);
-      if (err) { toast('导入被拒绝：' + err, 'fail', 5000); return; }
-      WB.evidence = sanitizeEvidence(data.evidence);
-      WB.state = sanitizeState(data.state);
-      quizState().answers = data.quiz ? sanitizeQuiz(data.quiz) : {};
-      persist();
-      render();
-      toast('导入成功：' + Object.keys(WB.evidence).length + ' 条证据，' + Object.keys(WB.state).length + ' 个实验状态');
-    };
-    reader.onerror = function () { toast('文件读取失败', 'fail'); };
-    reader.readAsText(f);
-    if (ev.target) ev.target.value = '';
-  }
-
-  function validateImport(d) {
-    if (!d || typeof d !== 'object') return '顶层不是对象';
-    if (d.schema !== WB.schema) return 'schema 不匹配（期望 ' + WB.schema + '）';
-    if (d.evidence && typeof d.evidence !== 'object') return 'evidence 不是对象';
-    if (d.state && typeof d.state !== 'object') return 'state 不是对象';
-    if (d.quiz !== undefined && (!d.quiz || typeof d.quiz !== 'object' || Array.isArray(d.quiz))) return 'quiz 不是对象';
-    var ids = WB.exps.map(function (e) { return e.id; });
-    var keys = Object.keys(d.evidence || {});
-    for (var i = 0; i < keys.length; i++) {
-      if (ids.indexOf(keys[i]) < 0) return '未知实验标识：' + keys[i];
-      var e = d.evidence[keys[i]];
-      if (!e || typeof e !== 'object') return '证据项格式错误：' + keys[i];
-      if (['pass', 'warn', 'fail'].indexOf(e.status) < 0) return '证据状态非法：' + keys[i];
-    }
-    var sk = Object.keys(d.state || {});
-    for (var j = 0; j < sk.length; j++) {
-      if (ids.indexOf(sk[j]) < 0) return '未知实验状态：' + sk[j];
-      if (!d.state[sk[j]] || typeof d.state[sk[j]] !== 'object') return '状态格式错误：' + sk[j];
-    }
-    return null;
-  }
-
-  function sanitizeQuiz(raw) {
-    var out = {};
-    var byId = {};
-    Q.QUIZ_QUESTIONS.forEach(function (q) { byId[q.id] = q; });
-    Object.keys(raw || {}).forEach(function (k) {
-      var q = byId[k];
-      if (!q) return;
-      var v = raw[k];
-      if (q.type === 'multi') {
-        if (Array.isArray(v)) {
-          var clean = v.filter(function (x) { return Number.isInteger(x) && x >= 0 && x < q.options.length; });
-          if (clean.length) out[k] = clean;
-        }
-      } else if (q.type === 'fill') {
-        if (typeof v === 'string' && v.trim()) out[k] = clip(v.trim(), 80);
-      } else {
-        if (Number.isInteger(v) && v >= 0 && v < q.options.length) out[k] = v;
-      }
-    });
-    return out;
-  }
-
-  function clip(s, n) { return typeof s === 'string' ? s.slice(0, n) : s; }
-
-  function sanitizeEvidence(ev) {
-    var out = {};
-    Object.keys(ev || {}).forEach(function (k) {
-      var e = ev[k];
-      out[k] = {
-        status: e.status, coverage: typeof e.coverage === 'number' && isFinite(e.coverage) ? e.coverage : null,
-        label: clip(String(e.label || ''), 40), note: clip(String(e.note || ''), 200),
-        defects: Array.isArray(e.defects) ? e.defects.slice(0, 20).map(function (x) { return clip(String(x), 40); }) : [],
-        at: clip(String(e.at || ''), 40), exp: k, no: e.no, title: clip(String(e.title || ''), 40),
-        demo: !!e.demo
-      };
-    });
-    return out;
-  }
-
-  function sanitizeState(st) {
-    var out = {};
-    Object.keys(st || {}).forEach(function (k) {
-      var def = WB.byId[k];
-      if (!def) return;
-      var src = st[k] || {};
-      var dst = Q.clone(def.defaults || {});
-      Object.keys(dst).forEach(function (f) {
-        if (src[f] === undefined) return;
-        var t = typeof dst[f];
-        if (t === 'number') { if (typeof src[f] === 'number' && isFinite(src[f])) dst[f] = src[f]; }
-        else if (t === 'boolean') { dst[f] = !!src[f]; }
-        else if (Array.isArray(dst[f])) { if (Array.isArray(src[f])) dst[f] = src[f].slice(0, 40).map(function (x) { return clip(String(x), 40); }); }
-        else dst[f] = clip(String(src[f]), 400);
-      });
-      out[k] = dst;
-    });
-    return out;
-  }
-
-  function downloadReport() {
-    var rows = WB.exps.map(function (d) {
-      var ev = WB.evidence[d.id];
-      return '<tr><td>M' + d.no + ' ' + E(d.title) + '</td><td>' + (ev ? (ev.status === 'pass' ? '达成' : ev.status === 'warn' ? '待改进' : '未通过') : '未记录') +
-        '</td><td>' + (ev && ev.coverage != null ? Q.num(ev.coverage, 1) + '%' : '—') + '</td><td>' + E(ev ? ev.note : '—') + '</td><td>' + E(ev ? ev.at : '—') + '</td></tr>';
+  function buildTopTabs() {
+    var expTabs = WB.exps.slice().sort(function (a, b) { return a.no - b.no; }).map(function (e) {
+      var m = EXP_META[e.id] || { emoji: '●', short: e.title };
+      return '<button type="button" class="top-tab" data-nav="exp/' + e.id + '">' +
+        '<span>' + e.no + ' ' + m.emoji + ' ' + Q.esc(m.short) + '</span>' +
+        '<i class="tab-dot" data-dot="' + e.id + '"></i>' +
+      '</button>';
     }).join('');
-    var ev = Q.qaNormEvidence(WB.evidence);
-    var risk = Q.qaComputeRisk(ev, Q.QA_DEFAULT_PARAMS);
-    var g = Q.qaGate(ev, Q.QA_DEFAULT_PARAMS, risk);
-    var html = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
-      '<title>青蓝 QA Lab 实验报告</title><style>' +
-      'body{font-family:"Microsoft YaHei",system-ui,sans-serif;max-width:820px;margin:32px auto;padding:0 20px;color:#14181d;line-height:1.7;font-size:13px}' +
-      'h1{font-size:20px}h2{font-size:15px;margin-top:26px;border-bottom:1px solid #e0e5e9;padding-bottom:4px}' +
-      'table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}th,td{border:1px solid #e0e5e9;padding:5px 8px;text-align:left}' +
-      'th{background:#fafbfb}.muted{color:#727a86;font-size:11.5px}.tag{display:inline-block;padding:1px 6px;border-radius:3px;background:#e4efee;color:#08423f}' +
-      '</style></head><body>';
-    html += '<h1>「青蓝」软件质量保证与测试实验工作台 · 实验报告</h1>';
-    html += '<p class="muted">生成时间：' + E(new Date().toLocaleString('zh-CN', { hour12: false })) + '　版本 ' + E(WB.version) + '</p>';
-    html += '<p class="muted">本报告汇总当前已记录的实验结论、发布质量门禁评估与随堂测验成绩。</p>';
-    html += '<h2>一、各实验结论</h2><table><thead><tr><th>实验</th><th>结论</th><th>主指标</th><th>说明</th><th>记录时间</th></tr></thead><tbody>' + rows + '</tbody></table>';
-    html += '<h2>二、发布质量门禁（默认参数）</h2>';
-    html += '<p>结论：<b>' + (g.passed ? '可发布' : '不可发布') + '</b>　风险指数 R = ' + risk.risk + '（阈值 ' + Q.QA_DEFAULT_PARAMS.riskThreshold + '）' +
-      '　证据 ' + risk.evidencePresent + '/7　加权覆盖率 ' + risk.coverage + '%　回归通过率 ' + (risk.passRate === null ? '—' : risk.passRate + '%') + '</p>';
-    html += '<table><thead><tr><th>门禁检查项</th><th>结论</th><th>证据来源</th><th>详情</th></tr></thead><tbody>' +
-      g.checks.map(function (c) {
-        return '<tr><td>' + E(c.label) + '</td><td>' + (c.ok ? '通过' : '未通过') + '</td><td>' + E(c.source) + '</td><td>' + E(c.detail) + '</td></tr>';
-      }).join('') + '</tbody></table>';
-    html += '<h2>三、风险指数构成</h2><table><thead><tr><th>维度</th><th>归一化值</th><th>权重</th><th>贡献（0–100）</th></tr></thead><tbody>' +
-      risk.parts.map(function (p) {
-        return '<tr><td>' + E(p.label) + '</td><td>' + Q.num(p.value, 3) + '</td><td>' + Q.num(p.weight, 2) + '</td><td>' + Q.num(p.contribution, 1) + '</td></tr>';
-      }).join('') + '</tbody></table>';
-    html += '<h2>四、随堂测验掌握度</h2>';
-    var qAll = Q.quizStats(quizState().answers);
-    html += '<p>已作答 <b>' + qAll.answered + '/' + qAll.total + '</b> 题 · 答对 ' + qAll.correct + ' 题 · 正确率 <b>' +
-      (qAll.accuracy == null ? '—' : qAll.accuracy + '%') + '</b></p>';
-    html += '</body></html>';
-    download('qlab-report.html', html, 'text/html;charset=utf-8');
+
+    return '<div class="top-tabs-wrap"><nav class="top-tabs" aria-label="功能导航">' +
+      '<button type="button" class="top-tab" data-nav="overview">🗺️ 总览导图</button>' +
+      expTabs +
+      '<button type="button" class="top-tab" data-nav="quiz">✨ 随堂挑战</button>' +
+      '<button type="button" class="top-tab" data-nav="evidence">📦 档案与地图</button>' +
+    '</nav></div>';
   }
 
-  /* --------------------------------------------------------- 课程地图页 */
-  function renderAboutPage(host) {
-    var rows = WB.exps.map(function (d) {
-      return { cells: [{ html: '<b>M' + d.no + '</b>' }, { v: d.title }, { v: d.chapter }, { v: d.knowledge }] };
+  function refreshNav() {
+    var r = parseHash();
+    var currentNav = r.view === 'exp' ? 'exp/' + r.id : (r.view === 'graph' ? 'overview' : r.view);
+    Array.prototype.forEach.call(document.querySelectorAll('.top-tab[data-nav]'), function (el) {
+      var on = el.getAttribute('data-nav') === currentNav;
+      el.classList.toggle('active', on);
+      el.setAttribute('aria-current', on ? 'page' : 'false');
     });
-    var html = '<div class="page-h"><div><h1>课程地图</h1>' +
-      '<div class="sub">《软件质量保证与测试：原理、技术与实践》全书章节与实验体系总览。</div></div></div>';
-
-    html += Q.card('平台体量与构成',
-      '<p class="theory-note">围绕统一业务场景「青蓝人才服务平台」串联全书核心质量工程方法，将理论公式转化为可实时调参、可核对分母、可当场自测的交互实验。</p>' +
-      '<div class="grid g4 mt10">' +
-      '<div class="metric"><div class="m-l">交互实验模块</div><div class="m-v">' + WB.exps.length + '</div></div>' +
-      '<div class="metric"><div class="m-l">多题型随堂试题</div><div class="m-v">' + Q.QUIZ_QUESTIONS.length + '</div></div>' +
-      '<div class="metric"><div class="m-l">可调实验参数</div><div class="m-v">' + WB.exps.reduce(function (a, d) { return a + d.params.length; }, 0) + '</div></div>' +
-      '<div class="metric"><div class="m-l">知识图谱节点 / 边</div><div class="m-v">' + Q.KG_NODES.length + ' / ' + Q.KG_EDGES.length + '</div></div>' +
-      '</div>');
-
-    html += Q.card('教材章节与实验能力映射',
-      Q.table(['编号', '实验主题', '对应教材章节', '核心能力目标'], rows),
-      { cls: 'mt14' });
-
-    html += Q.card('双主线实训体系架构',
-      '<div class="grid g2">' +
-      '<div class="spec-col"><div class="spec-k">报名计费线（M2 · M3 · M6 · M7）</div>' +
-      '<p class="theory-note mt6">共用同一套企业培训计费业务规则（基础单价 120 元 / 持证 90 元、团体阶梯折扣与复训 7 折互斥、优惠券 0–500 元且应付封底为 0），可对照观察等价类、边界值、代码控制流覆盖与回归断言如何从不同视角检验同一段核心逻辑。</p></div>' +
-      '<div class="spec-col"><div class="spec-k">资格审批与质量门禁线（M1 · M4 · M5 · M8）</div>' +
-      '<p class="theory-note mt6">贯通静态代码审查、4 条件 16 组合资格决策表、11 状态全生命周期状态机与持续集成门禁；各模块实操结论最终沉淀为质量证据，共同驱动 M8 量化风险评估与发布放行判定。</p></div>' +
-      '</div>',
-      { cls: 'mt14' });
-
-    host.innerHTML = html;
-  }
-
-  /* --------------------------------------------------------- 首次引导 */
-  var guideStep = 0;
-  var GUIDE = [
-    {
-      t: '欢迎使用青蓝 QA Lab',
-      b: '<p>8 个交互实验 + ' + Q.QUIZ_QUESTIONS.length + ' 道单选、多选与填空自测题，带你走完「审查 → 设计 → 覆盖 → 门禁」全流程。</p>' +
-        '<p class="mt6">左侧调节参数，右侧图表、反例诊断与证据状态同步刷新。</p>'
-    },
-    {
-      t: '做完实验，马上随堂验证',
-      b: '<p>每个实验顶部支持一键切换 <b>交互实验 / 随堂自测 / 原理与误区</b>。</p>' +
-        '<p class="mt6">推荐从 <b>M2 等价类</b> 或 <b>M1 静态审查</b> 起步，记录的实验结论会自动汇总到 M8 质量门禁。</p>'
-    },
-    {
-      t: '灵活收纳与成果导出',
-      b: '<p>页面细节表格采用卡片收纳设计，点开即看；顶部支持随时导出 JSON 记录与排版完整的 HTML 实训报告。</p>'
+    WB.exps.forEach(function (e) {
+      var dot = document.querySelector('[data-dot="' + e.id + '"]');
+      if (dot) dot.classList.toggle('done', Boolean(WB.evidence[e.id]));
+    });
+    var stat = document.getElementById('stat');
+    if (stat) {
+      var evN = WB.exps.filter(function (e) { return Boolean(WB.evidence[e.id]); }).length;
+      var qS = Q.quizStats(WB.quizAnswers);
+      stat.textContent = '档案 ' + evN + '/' + WB.exps.length + ' · 答题 ' + qS.answered + '/' + qS.total;
     }
-  ];
-
-  function openGuide(step, forced) {
-    guideStep = step || 0;
-    var old = document.getElementById('guide-overlay');
-    if (old) old.remove();
-    var g = GUIDE[guideStep];
-    var ov = document.createElement('div');
-    ov.className = 'overlay';
-    ov.id = 'guide-overlay';
-    ov.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">' +
-      '<div class="modal-h"><h2 id="guide-title">' + E(g.t) + '</h2></div>' +
-      '<div class="modal-b"><div class="guide-steps">' +
-      GUIDE.map(function (_, i) { return '<i class="' + (i <= guideStep ? 'on' : '') + '"></i>'; }).join('') +
-      '</div>' + g.b + '</div>' +
-      '<div class="modal-f">' +
-      (forced ? '<button class="btn ghost" data-guide="skip">跳过</button>' : '') +
-      (guideStep > 0 ? '<button class="btn" data-guide="prev">上一步</button>' : '') +
-      '<button class="btn primary" data-guide="' + (guideStep === GUIDE.length - 1 ? 'done' : 'next') + '">' +
-      (guideStep === GUIDE.length - 1 ? '开始使用' : '下一步') + '</button>' +
-      '</div></div>';
-    document.body.appendChild(ov);
-    ov.addEventListener('click', function (ev) {
-      var b = ev.target.closest('[data-guide]');
-      if (!b) { if (ev.target === ov) closeGuide(); return; }
-      var a = b.getAttribute('data-guide');
-      if (a === 'next') openGuide(guideStep + 1, forced);
-      else if (a === 'prev') openGuide(guideStep - 1, forced);
-      else closeGuide();
-    });
-    var first = ov.querySelector('button');
-    if (first) first.focus();
-  }
-  function closeGuide() {
-    var ov = document.getElementById('guide-overlay');
-    if (ov) ov.remove();
-    try { window.localStorage.setItem('qinglan.guide.seen', '1'); } catch (e) {}
   }
 
-  /* --------------------------------------------------------------- 启动 */
-  var booted = false;
-  function boot() {
-    if (booted) return;
-    booted = true;
+  /* ------------------------------------------------------------------ 视图 1：总览导图 */
+  function renderOverview() {
+    var host = document.getElementById('view');
+    var sorted = WB.exps.slice().sort(function (a, b) { return a.no - b.no; });
+    var doneN = sorted.filter(function (e) { return Boolean(WB.evidence[e.id]); }).length;
+    var nextExp = sorted.find(function (e) { return !WB.evidence[e.id]; }) || sorted[0];
+    var qStats = Q.quizStats(WB.quizAnswers);
+    var evPct = Math.round((doneN / (sorted.length || 1)) * 100);
+    var qPct = qStats.answered ? Math.round((qStats.correct / qStats.answered) * 100) : null;
 
-    var root = document.getElementById('app');
-    root.className = 'app';
-    root.innerHTML =
-      '<aside class="rail">' +
-      '<div class="rail-brand"><div class="mark"><span class="dot"></span>青蓝 QA Lab</div>' +
-      '<div class="sub">软件质量保证与测试</div></div>' +
-      '<nav class="rail-nav" id="rail-nav"></nav>' +
-      '<div class="rail-foot">单文件 · 离线可用 · v' + WB.version + '</div>' +
-      '</aside>' +
-      '<div class="main">' +
-      '<header class="topbar"><div class="crumb" id="crumb"></div><div class="topbar-spacer"></div>' +
-      '<div class="row" id="topbar-actions" style="gap:6px"></div></header>' +
-      '<div class="view" id="view"></div>' +
+    var html = [];
+
+    html.push('<section class="hero-banner">' +
+      '<div>' +
+        '<span class="hero-eyebrow">🎯 像玩小游戏一样学会软件测试</span>' +
+        '<h2 class="hero-title">八大测试闯关游乐场</h2>' +
+        '<p class="hero-lead">不用死记术语！挑一关点进去，拨动按钮、跑一遍动画、看懂底下的“大白话教练”，最后到「随堂挑战」检验实力。</p>' +
+        '<div class="btn-row mt12">' +
+          '<button type="button" class="btn primary lg" data-nav="exp/' + nextExp.id + '">🚀 ' + (doneN === 0 ? '从第 1 关开始玩' : '继续玩 M' + nextExp.no + ' ' + EXP_META[nextExp.id].short) + '</button>' +
+          '<button type="button" class="btn lg" data-nav="quiz">✨ 随堂挑战（' + qStats.total + ' 题）</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="hero-stats">' +
+        '<div class="hg-mini">' + Q.ring(evPct, { size: 52, color: '#0e9f8a', label: '关卡档案' }) +
+          '<div><div class="hg-k">已打卡关卡</div><div class="hg-v">' + doneN + ' / ' + sorted.length + ' 关</div></div></div>' +
+        '<div class="hg-mini">' + Q.ring(qPct, { size: 52, color: '#0284c7', label: '挑战正确率' }) +
+          '<div><div class="hg-k">随堂挑战进度</div><div class="hg-v">' + qStats.answered + ' / ' + qStats.total + ' 题</div></div></div>' +
+      '</div>' +
+    '</section>');
+
+    html.push('<div class="card mt14">' +
+      '<div class="card-h">' +
+        '<div><span class="card-t">🗺️ 学习闯关路线图</span> <span class="card-sub">鼠标放上去看上下游连线，点卡片直接挑一关开玩</span></div>' +
+        '<div class="btn-row"><button type="button" class="btn sm" data-nav="evidence">📦 查看过关档案</button></div>' +
+      '</div>' +
+      '<div class="card-b">' +
+        '<div id="overview-graph"></div>' +
+        '<div id="overview-gdetail" class="mt10"></div>' +
+      '</div>' +
+    '</div>');
+
+    var cards = sorted.map(function (e) {
+      var m = EXP_META[e.id] || { emoji: '🎯', short: e.title, plain: e.hook };
+      var ev = WB.evidence[e.id];
+      var stChip = ev
+        ? (ev.pass ? Q.badge('pass', '✅ 已过关') : Q.badge('warn', '📌 已打卡'))
+        : Q.badge('mute', '未游玩');
+      return '<button type="button" class="bento-exp" data-nav="exp/' + e.id + '">' +
+        '<div class="be-top"><span class="be-no">' + m.emoji + ' 第 ' + e.no + ' 关</span>' + stChip + '</div>' +
+        '<div class="be-title">' + Q.esc(e.title) + '</div>' +
+        '<div class="be-hook">' + Q.esc(m.plain) + '</div>' +
+        '<div class="be-foot"><span>' + Q.esc(e.chapter) + '</span><span class="be-go">进去玩 →</span></div>' +
+      '</button>';
+    }).join('');
+
+    html.push('<div class="grid g4 mt14">' + cards + '</div>');
+
+    var cfg = Q.CONFIG;
+    var specBody = '<div class="spec-strip">' +
+      '<div><div class="spec-k">📝 大家共同测谁？一个「职业技能培训报名算费系统」</div>' +
+      '<table class="tbl mt6"><thead><tr><th>输入框</th><th>规矩</th></tr></thead><tbody>' +
+        '<tr><td><b>培训课时</b></td><td>整数 ' + cfg.hours.min + ' ~ ' + cfg.hours.max + ' 课时</td></tr>' +
+        '<tr><td><b>报名人数</b></td><td>整数 ' + cfg.seats.min + ' ~ ' + cfg.seats.max + ' 人</td></tr>' +
+        '<tr><td><b>优惠券额</b></td><td>整数 ' + cfg.coupon.min + ' ~ ' + cfg.coupon.max + ' 元（最少付0元）</td></tr>' +
+        '<tr><td><b>学员类型</b></td><td>新学员 / 复训(7折) / 企业团体</td></tr>' +
+      '</tbody></table></div>' +
+      '<div><div class="spec-k">💰 算钱规矩（无证 ' + cfg.unitPrice + ' 元/课时 · 持证 ' + cfg.certUnitPrice + ' 元/课时）</div>' +
+      '<table class="tbl mt6"><thead><tr><th>人数或身份</th><th>享受折扣（不叠加取更优）</th></tr></thead><tbody>' +
+      cfg.seatTiers.map(function (t) {
+        return '<tr><td>' + Q.esc(t.label.split(' ')[0]) + '</td><td><b>' + (Math.round(t.rate * 100) / 10) + ' 折</b>（系数 ' + t.rate + '）</td></tr>';
+      }).join('') +
+      '<tr><td>复训学员</td><td><b>7 折</b>（与团体折扣二选一更省）</td></tr>' +
+      '</tbody></table></div>' +
+    '</div>';
+    html.push('<div class="mt14">' + Q.drawer('💡 所有关卡测的都是同一个小系统（想看规矩点这里展开）', '统一被测物速查', specBody, false) + '</div>');
+
+    host.innerHTML = html.join('');
+    mountInteractiveGraph('overview-graph', 'overview-gdetail');
+  }
+
+  function mountInteractiveGraph(graphId, detailId) {
+    var gHost = document.getElementById(graphId);
+    if (!gHost) return;
+    function draw(focusId) {
+      Q.kgRender(gHost, {
+        nodes: Q.KG_NODES,
+        edges: Q.KG_EDGES,
+        edgeTypes: Q.KG_EDGE_TYPES,
+        active: focusId,
+        onSelect: function (nid) {
+          if (WB.session.gFocus === nid && WB.byId[nid]) {
+            go('exp/' + nid);
+            return;
+          }
+          WB.session.gFocus = nid;
+          draw(nid);
+          renderGraphDetail(detailId, nid);
+        }
+      });
+    }
+    var initId = WB.session.gFocus || 'm1';
+    draw(initId);
+    renderGraphDetail(detailId, initId);
+  }
+
+  function renderGraphDetail(detailId, id) {
+    var dHost = document.getElementById(detailId);
+    if (!dHost) return;
+    var node = Q.KG_NODES.find(function (x) { return x.id === id; }) || Q.KG_NODES[0];
+    var exp = WB.byId[node.id];
+    var m = EXP_META[node.id];
+    dHost.innerHTML = '<div class="coach-fb is-info">' +
+      '<div class="cf-ico">' + (m ? m.emoji : '✨') + '</div>' +
+      '<div class="cf-main">' +
+        '<div class="cf-title">' + Q.esc(node.label) + ' <span class="chapter-tag">' + Q.esc(node.chapter) + '</span></div>' +
+        '<div class="cf-text">' + Q.esc(m ? m.plain : (node.note || '对应书本基础概念节点，点击任意 M1~M8 卡片可直接动手体验。')) + '</div>' +
+      '</div>' +
+      (exp ? '<button type="button" class="btn primary" data-nav="exp/' + exp.id + '">▶ 进去玩第 ' + exp.no + ' 关</button>' : '') +
+    '</div>';
+  }
+
+  /* ------------------------------------------------------------------ 视图 2：知识图谱独立页（兼容 #/graph） */
+  function renderGraphPage() {
+    var host = document.getElementById('view');
+    host.innerHTML = '<div class="card">' +
+      '<div class="card-h"><div><span class="card-t">🗺️ 测试知识点通关全景图</span></div>' +
+      '<button type="button" class="btn sm" data-nav="overview">← 回到总览</button></div>' +
+      '<div class="card-b"><div id="graph-page-host"></div><div id="graph-page-detail" class="mt10"></div></div>' +
+    '</div>';
+    mountInteractiveGraph('graph-page-host', 'graph-page-detail');
+  }
+
+  /* ------------------------------------------------------------------ 视图 3：单实验舞台 */
+  function renderParamControl(p, st) {
+    var val = st[p.key];
+    if (p.type === 'action') {
+      return '<div class="ctrl-acts"><button type="button" class="btn ' + (p.variant || 'fun') + '" data-act="' + Q.attr(p.action) + '">' + Q.esc(p.label) + '</button>' +
+        (p.hint ? '<span class="tiny muted">' + Q.esc(p.hint) + '</span>' : '') + '</div>';
+    }
+    if (p.type === 'pills' || p.type === 'radio') {
+      var opts = p.options || [];
+      return '<div class="field"><label>' + Q.esc(p.label) + '</label>' +
+        '<div class="seg" role="group">' + opts.map(function (o) {
+          return '<button type="button" class="' + (String(val) === String(o.v) ? 'on' : '') + '" data-p="' + Q.attr(p.key) + '" data-v="' + Q.attr(o.v) + '">' + Q.esc(o.l) + '</button>';
+        }).join('') + '</div></div>';
+    }
+    if (p.type === 'select') {
+      return '<div class="field"><label for="p-' + Q.attr(p.key) + '">' + Q.esc(p.label) + '</label>' +
+        '<select id="p-' + Q.attr(p.key) + '" data-p="' + Q.attr(p.key) + '">' +
+        (p.options || []).map(function (o) {
+          return '<option value="' + Q.attr(o.v) + '"' + (String(val) === String(o.v) ? ' selected' : '') + '>' + Q.esc(o.l) + '</option>';
+        }).join('') + '</select></div>';
+    }
+    if (p.type === 'range') {
+      var unit = p.unit || '';
+      return '<div class="field"><label for="p-' + Q.attr(p.key) + '">' + Q.esc(p.label) + '</label>' +
+        '<div class="range-row"><input id="p-' + Q.attr(p.key) + '" type="range" data-p="' + Q.attr(p.key) + '" min="' + p.min + '" max="' + p.max + '" step="' + (p.step || 1) + '" value="' + Q.attr(val) + '">' +
+        '<output data-out="' + Q.attr(p.key) + '">' + Q.esc(String(val)) + Q.esc(unit) + '</output></div></div>';
+    }
+    if (p.type === 'checkbox') {
+      return '<label class="check"><input type="checkbox" data-p="' + Q.attr(p.key) + '"' + (val ? ' checked' : '') + '><span><b>' + Q.esc(p.label) + '</b>' +
+        (p.hint ? '<span class="ck-sub">' + Q.esc(p.hint) + '</span>' : '') + '</span></label>';
+    }
+    if (p.type === 'checks') {
+      var list = Array.isArray(val) ? val : [];
+      return '<div class="field"><span class="field-label">' + Q.esc(p.label) + '</span>' +
+        '<div class="checks2">' + (p.options || []).map(function (o) {
+          var on = list.indexOf(o.v) >= 0;
+          return '<label class="check"><input type="checkbox" data-p="' + Q.attr(p.key) + '" data-multi="1" value="' + Q.attr(o.v) + '"' + (on ? ' checked' : '') + '>' +
+            '<span>' + Q.esc(o.l) + (o.sub ? '<span class="ck-sub">' + Q.esc(o.sub) + '</span>' : '') + '</span></label>';
+        }).join('') + '</div></div>';
+    }
+    return '';
+  }
+
+  function renderCtrlBar(exp, st) {
+    var plist = typeof exp.params === 'function' ? exp.params(st, WB) : (exp.params || []);
+    var quick = plist.filter(function (p) { return !p.advanced; });
+    var adv = plist.filter(function (p) { return Boolean(p.advanced); });
+
+    var mainItems = quick.map(function (p) {
+      var cls = p.type === 'action' ? 'ctrl-acts' : ('ctrl-item' + (p.wide ? ' is-wide' : ''));
+      if (p.type === 'action') return renderParamControl(p, st);
+      return '<div class="' + cls + '">' + renderParamControl(p, st) + '</div>';
+    }).join('');
+
+    var advHtml = '';
+    if (adv.length) {
+      advHtml = '<details class="adv-details">' +
+        '<summary>⚙️ 高级调节 & 更多选项（想细调参数点这里）</summary>' +
+        '<div class="adv-grid">' + adv.map(function (p) { return '<div>' + renderParamControl(p, st) + '</div>'; }).join('') + '</div>' +
+      '</details>';
+    }
+
+    return '<div class="ctrl-bar">' +
+      '<div class="ctrl-main-row">' + mainItems + '</div>' +
+      advHtml +
+    '</div>';
+  }
+
+  function buildRightHtml(exp, res, st) {
+    var vizHtml = exp.viz(res, st, WB);
+    var vfyHtml = exp.verify ? exp.verify(res, st, WB) : '';
+    return vizHtml + (vfyHtml ? '<div class="mt2">' + vfyHtml + '</div>' : '');
+  }
+
+  function updateExpStage(exp, rebuildCtrl) {
+    var st = ensureState(exp);
+    var res = exp.compute(st, WB);
+    if (rebuildCtrl) {
+      var ctrlHost = document.getElementById('exp-ctrl-host');
+      if (ctrlHost) ctrlHost.innerHTML = renderCtrlBar(exp, st);
+    }
+    var colR = document.getElementById('col-right');
+    if (colR) colR.innerHTML = buildRightHtml(exp, res, st);
+    refreshNav();
+  }
+
+  function renderExpQuizTab(exp) {
+    var pool = Q.quizByExp(exp.id);
+    var stats = Q.quizStats(WB.quizAnswers, pool);
+    return '<div class="card quiz-banner"><div class="card-b"><div class="split" style="align-items:center">' +
+      '<div class="btn-row">' +
+        Q.ring(stats.answered ? Math.round((stats.correct / stats.answered) * 100) : null, { size: 50, color: '#0284c7' }) +
+        '<div><div class="card-t">第 ' + exp.no + ' 关随堂小测</div>' +
+        '<div class="tiny muted">已答 ' + stats.answered + '/' + stats.total + ' 题 · 答对 ' + stats.correct + ' 题（点击选项立刻告诉你对不对 & 为啥）</div></div>' +
+      '</div>' +
+      '<div class="btn-row" style="justify-content:flex-end">' +
+        '<button type="button" class="btn sm" data-act="quiz-clear-exp" data-eid="' + exp.id + '">重置本关小题</button>' +
+        '<button type="button" class="btn sm primary" data-nav="quiz">去全套随堂挑战 →</button>' +
+      '</div>' +
+    '</div></div></div>' +
+    '<div class="quiz-list mt12">' +
+      pool.map(function (q, idx) { return renderQuizCard(q, idx + 1, { compact: true }); }).join('') +
+    '</div>';
+  }
+
+  function renderExpPage(id) {
+    clearAnim();
+    var exp = WB.byId[id];
+    if (!exp) { go('overview'); return; }
+    var st = ensureState(exp);
+    var res = exp.compute(st, WB);
+    var m = EXP_META[exp.id] || { emoji: '🧪', plain: exp.hook };
+    var tab = WB.session.tab[exp.id] || 'lab';
+    var qPool = Q.quizByExp(exp.id);
+    var ev = WB.evidence[exp.id];
+    var host = document.getElementById('view');
+
+    var evBadge = ev
+      ? (ev.pass ? Q.badge('pass', '✅ 已打卡过关') : Q.badge('warn', '📌 已记入档案'))
+      : '';
+
+    var headHtml = '<div class="exp-head">' +
+      '<div class="exp-head-main">' +
+        '<div class="exp-no">' + m.emoji + '</div>' +
+        '<div class="exp-title-wrap">' +
+          '<div class="exp-title-row">' +
+            '<h1>第 ' + exp.no + ' 关 · ' + Q.esc(exp.title) + '</h1>' +
+            '<span class="chapter-tag">' + Q.esc(exp.chapter) + '</span>' + evBadge +
+          '</div>' +
+          '<div class="exp-sub">' + Q.esc(m.plain) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="exp-meta">' +
+        '<div class="seg-tabs" role="tablist">' +
+          '<button type="button" role="tab" class="' + (tab === 'lab' ? 'on' : '') + '" data-act="exp-tab" data-t="lab">🎮 动手玩</button>' +
+          '<button type="button" role="tab" class="' + (tab === 'quiz' ? 'on' : '') + '" data-act="exp-tab" data-t="quiz">📝 随堂测 <span class="tab-cnt">' + qPool.length + '</span></button>' +
+          '<button type="button" role="tab" class="' + (tab === 'theory' ? 'on' : '') + '" data-act="exp-tab" data-t="theory">💡 一句话秘诀</button>' +
+        '</div>' +
+        '<div class="exp-head-acts">' +
+          '<button type="button" class="btn primary sm" data-act="record-evidence">📌 记为过关档案</button>' +
+          '<button type="button" class="btn sm" data-act="reset-exp">↺ 重置</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+    var bodyHtml = '';
+    if (tab === 'lab') {
+      bodyHtml = '<div id="exp-ctrl-host">' + renderCtrlBar(exp, st) + '</div>' +
+        '<div id="col-right" class="col-right">' + buildRightHtml(exp, res, st) + '</div>';
+    } else if (tab === 'quiz') {
+      bodyHtml = '<div class="exp-panel-scroll">' + renderExpQuizTab(exp) + '</div>';
+    } else {
+      bodyHtml = '<div class="exp-panel-scroll">' +
+        (exp.goal ? '<div class="coach-fb is-info mb10"><div class="cf-ico">🎯</div><div class="cf-main"><div class="cf-title">这一关 30 秒搞懂啥？</div><ul class="goal-list mt6">' +
+          exp.goal.map(function (g) { return '<li><b>✓</b><span>' + Q.esc(g) + '</span></li>'; }).join('') +
+        '</ul></div></div>' : '') +
+        (exp.theory ? exp.theory(st, res, WB) : '') +
       '</div>';
+    }
 
-    document.getElementById('topbar-actions').innerHTML =
-      '<span class="topbar-stat" id="stat"></span>' +
-      '<button class="icon-btn" data-act="import-all" title="导入 JSON 记录">导入</button>' +
-      '<button class="icon-btn" data-act="export-all" title="导出全部记录">导出</button>' +
-      '<button class="icon-btn" data-act="help" title="重新查看引导">引导</button>';
+    host.innerHTML = '<section class="exp">' + headHtml + bodyHtml + '</section>';
+  }
 
-    loadPersisted();
+  function applyExpParam(exp, key, val, target) {
+    var st = ensureState(exp);
+    st[key] = val;
+    var host = document.getElementById('view');
+    if (host && target && target.type === 'range') {
+      var out = host.querySelector('[data-out="' + key + '"]');
+      if (out) {
+        var plist = typeof exp.params === 'function' ? exp.params(st, WB) : (exp.params || []);
+        var meta = plist.find(function (p) { return p.key === key; });
+        out.textContent = String(val) + ((meta && meta.unit) || '');
+      }
+    }
+    if (exp.onParam) exp.onParam(key, val, st, WB);
+    saveStore();
+    updateExpStage(exp, false);
+  }
+
+  /* ------------------------------------------------------------------ 视图 4：随堂挑战题库 */
+  function renderQuizCard(q, idx, opts) {
+    opts = opts || {};
+    var qtype = q.type || 'single';
+    var typeTag = qtype === 'multi'
+      ? '<span class="q-type qt-multi">多选题</span>'
+      : (qtype === 'fill' ? '<span class="q-type qt-fill">填空题</span>' : '<span class="q-type qt-single">单选题</span>');
+    var diffMap = { '基础': ['基础', 'qdiff-base'], '进阶': ['进阶', 'qdiff-mid'], '综合': ['综合', 'qdiff-adv'] };
+    var dm = diffMap[q.diff] || ['基础', 'qdiff-base'];
+    var ans = WB.quizAnswers[q.id];
+    var done = Q.quizIsAnswered(q, ans);
+    var ok = done ? Q.quizCheck(q, ans) : false;
+
+    var cardCls = 'card qcard' + (done ? (ok ? ' is-ok' : ' is-bad') : '');
+    var letters = ['A', 'B', 'C', 'D', 'E', 'F'];
+    var topicLabel = (Q.QUIZ_TOPICS.find(function (t) { return t.key === q.topic; }) || { label: q.chapter || q.topic }).label;
+
+    var bodyInner = '';
+    if (qtype === 'fill') {
+      var fillVal = done ? String(ans) : (WB.quizDrafts[q.id] || '');
+      bodyInner = '<div class="q-fill-box">' +
+        '<input type="text" class="q-fill-inp" data-q-fill="' + Q.attr(q.id) + '" placeholder="' + Q.attr(q.placeholder || '输入答案关键词或数字…') + '" value="' + Q.attr(fillVal) + '"' + (done ? ' disabled' : '') + '>' +
+        (!done
+          ? '<button type="button" class="btn primary" data-act="quiz-submit-fill" data-qid="' + Q.attr(q.id) + '">提交答案</button>'
+          : '<button type="button" class="btn sm" data-act="quiz-clear" data-qid="' + Q.attr(q.id) + '">重做此题</button>') +
+      '</div>' +
+      (done ? '<div class="q-actbar"><span class="tiny muted">你的填写：<b>' + Q.esc(ans) + '</b> · 参考答案：<b>' + Q.esc(Q.quizFormatAnswer(q)) + '</b></span></div>' : '');
+    } else if (qtype === 'multi') {
+      var draft = Array.isArray(WB.quizDrafts[q.id]) ? WB.quizDrafts[q.id] : [];
+      var rightSet = q.answer || [];
+      var pickedSet = done ? (Array.isArray(ans) ? ans : []) : draft;
+      bodyInner = '<div class="q-opts">' +
+        (q.options || []).map(function (opt, oi) {
+          var lt = letters[oi] || String(oi + 1);
+          var isPicked = pickedSet.indexOf(oi) >= 0;
+          var isRight = rightSet.indexOf(oi) >= 0;
+          var cls = 'q-opt';
+          var tag = '';
+          if (!done) {
+            if (isPicked) cls += ' opt-picked';
+          } else {
+            if (isPicked && isRight) cls += ' opt-right';
+            else if (isPicked && !isRight) cls += ' opt-wrong';
+            else if (!isPicked && isRight) { cls += ' opt-miss'; tag = '<span class="q-miss-tag">漏选</span>'; }
+            else cls += ' opt-dim';
+          }
+          return '<button type="button" class="' + cls + '" data-act="quiz-toggle" data-qid="' + Q.attr(q.id) + '" data-opt="' + oi + '"' + (done ? ' disabled' : '') + '>' +
+            '<span class="q-letter q-chk">' + lt + '</span>' +
+            '<span class="q-otext">' + Q.esc(opt) + tag + '</span>' +
+          '</button>';
+        }).join('') +
+      '</div>' +
+      '<div class="q-actbar"><span class="tiny muted">' +
+        (done ? '正确答案：<b>' + Q.esc(Q.quizFormatAnswer(q)) + '</b>' : ('已勾选 ' + draft.length + ' 项（支持多选）')) +
+      '</span>' +
+      (!done
+        ? '<button type="button" class="btn primary sm" data-act="quiz-submit-multi" data-qid="' + Q.attr(q.id) + '"' + (draft.length ? '' : ' disabled') + '>确认提交</button>'
+        : '<button type="button" class="btn sm" data-act="quiz-clear" data-qid="' + Q.attr(q.id) + '">重做此题</button>') +
+      '</div>';
+    } else {
+      bodyInner = '<div class="q-opts">' +
+        (q.options || []).map(function (opt, oi) {
+          var lt = letters[oi] || String(oi + 1);
+          var isPicked = done && ans === oi;
+          var isRight = q.answer === oi;
+          var cls = 'q-opt';
+          if (done) {
+            if (isRight) cls += ' opt-right';
+            else if (isPicked && !isRight) cls += ' opt-wrong';
+            else cls += ' opt-dim';
+          }
+          return '<button type="button" class="' + cls + '" data-act="quiz-pick" data-qid="' + Q.attr(q.id) + '" data-opt="' + oi + '"' + (done ? ' disabled' : '') + '>' +
+            '<span class="q-letter">' + lt + '</span>' +
+            '<span class="q-otext">' + Q.esc(opt) + '</span>' +
+          '</button>';
+        }).join('') +
+      '</div>' +
+      (done ? '<div class="q-actbar"><span class="tiny muted">你的选择：<b>' + Q.esc(letters[ans] || ans) + '</b> · 正确答案：<b>' + Q.esc(Q.quizFormatAnswer(q)) + '</b></span><button type="button" class="btn sm" data-act="quiz-clear" data-qid="' + Q.attr(q.id) + '">重做此题</button></div>' : '');
+    }
+
+    var explainHtml = '';
+    if (done) {
+      var optList = (q.optionNotes || []).map(function (note, oi) {
+        var r = qtype === 'multi' ? ((q.answer || []).indexOf(oi) >= 0) : (q.answer === oi);
+        var lt = letters[oi] || String(oi + 1);
+        return '<li class="' + (r ? 'is-r' : 'is-w') + '"><span class="qe-opt-tag">' + lt + '</span><span>' + Q.esc(note) + '</span></li>';
+      }).join('');
+      explainHtml = '<div class="q-explain ' + (ok ? 'ok' : 'bad') + '">' +
+        '<div class="qe-head"><b>' + (ok ? '🎉 答对了！' : '💡 差一点！正确答案是 ' + Q.esc(Q.quizFormatAnswer(q))) + '</b>' +
+        (q.exp && !opts.compact ? '<button type="button" class="link tiny" data-nav="exp/' + q.exp + '">回第 ' + q.exp.slice(1) + ' 关再试试 →</button>' : '') +
+        '</div>' +
+        '<p class="qe-sum">' + Q.esc(q.explain || '') + '</p>' +
+        (optList ? '<div class="qe-breakdown"><div class="qe-sub">逐项大白话拆解</div><ul class="qe-opts">' + optList + '</ul></div>' : '') +
+      '</div>';
+    }
+
+    return '<div class="' + cardCls + '" data-qid="' + Q.attr(q.id) + '">' +
+      '<div class="qcard-h">' +
+        '<div class="btn-row"><span class="q-id">#' + idx + ' · ' + Q.esc(q.id) + '</span>' + typeTag + '<span class="q-diff ' + dm[1] + '">' + dm[0] + '</span></div>' +
+        '<span class="chapter-tag">' + Q.esc(q.chapter || topicLabel) + '</span>' +
+      '</div>' +
+      '<div class="qcard-b">' +
+        '<div class="q-stem"><span class="q-idx">Q' + idx + '.</span> ' + Q.esc(q.stem) + '</div>' +
+        bodyInner +
+        explainHtml +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderQuizPage() {
+    var host = document.getElementById('view');
+    var f = WB.quizFilter;
+    var allStats = Q.quizStats(WB.quizAnswers, Q.QUIZ_QUESTIONS);
+    var pool = Q.quizFilter({ topic: f.topic, diff: f.diff, type: f.type });
+    if (f.wrongOnly) {
+      pool = pool.filter(function (q) {
+        return Q.quizIsAnswered(q, WB.quizAnswers[q.id]) && !Q.quizCheck(q, WB.quizAnswers[q.id]);
+      });
+    }
+    var list = f.mode === 'quick5' ? pool.slice(0, 5) : pool;
+    var acc = allStats.answered ? Math.round((allStats.correct / allStats.answered) * 100) : null;
+
+    var kpis = Q.kpiStrip([
+      { icon: '📚', label: '题库总题量', value: allStats.total + ' 题', sub: '单选 28 · 多选 10 · 填空 10', tone: 'blue' },
+      { icon: '✏️', label: '已完成挑战', value: allStats.answered + ' 题', sub: '进度会自动存进本地档案', tone: 'teal' },
+      { icon: '🎉', label: '当前正确率', value: acc == null ? '—' : acc + '%', sub: '累计答对 ' + allStats.correct + ' 题', tone: acc >= 80 ? 'ok' : (acc == null ? 'blue' : 'warn') },
+      { icon: '🔍', label: '错题本', value: allStats.wrong + ' 题', sub: '点下面「只看错题」一键复盘', tone: allStats.wrong ? 'bad' : 'ok' }
+    ]);
+
+    var topicPills = Q.QUIZ_TOPICS.map(function (t) {
+      return '<button type="button" class="pill-btn' + (f.topic === t.key ? ' on' : '') + '" data-act="quiz-filter" data-fk="topic" data-fv="' + t.key + '">' + Q.esc(t.label) + '</button>';
+    }).join('');
+
+    var typePills = [
+      { v: 'all', l: '全部题型' }, { v: 'single', l: '单选题' }, { v: 'multi', l: '多选题' }, { v: 'fill', l: '填空题' }
+    ].map(function (x) {
+      return '<button type="button" class="pill-btn' + (f.type === x.v ? ' on' : '') + '" data-act="quiz-filter" data-fk="type" data-fv="' + x.v + '">' + x.l + '</button>';
+    }).join('');
+
+    var diffPills = [
+      { v: 'all', l: '全部难度' }, { v: '基础', l: '基础' }, { v: '进阶', l: '进阶' }, { v: '综合', l: '综合' }
+    ].map(function (x) {
+      return '<button type="button" class="pill-btn' + (f.diff === x.v ? ' on' : '') + '" data-act="quiz-filter" data-fk="diff" data-fv="' + x.v + '">' + x.l + '</button>';
+    }).join('');
+
+    host.innerHTML = '<section class="exp">' +
+      kpis +
+      '<div class="card"><div class="card-b"><div class="quiz-filters">' +
+        '<div class="qf-row"><span class="qf-lbl">主题</span><div class="qf-pills">' + topicPills + '</div></div>' +
+        '<div class="qf-row"><span class="qf-lbl">题型</span><div class="qf-pills">' + typePills +
+          '<button type="button" class="pill-btn' + (f.wrongOnly ? ' on warn' : '') + '" data-act="quiz-filter" data-fk="wrongOnly" data-fv="toggle">🚨 只看错题 (' + allStats.wrong + ')</button>' +
+          '<button type="button" class="pill-btn' + (f.mode === 'quick5' ? ' on' : '') + '" data-act="quiz-filter" data-fk="mode" data-fv="' + (f.mode === 'quick5' ? 'all' : 'quick5') + '">⚡ 只刷前5题</button>' +
+        '</div></div>' +
+        '<div class="qf-row"><span class="qf-lbl">难度</span><div class="qf-pills">' + diffPills +
+          '<button type="button" class="btn sm ghost" data-act="quiz-reset">🧹 清空作答记录</button>' +
+        '</div></div>' +
+      '</div></div></div>' +
+      (list.length
+        ? '<div class="quiz-list">' + list.map(function (q, i) { return renderQuizCard(q, i + 1); }).join('') + '</div>'
+        : Q.empty('当前筛选条件没有匹配的题目，换个主题或取消“只看错题”试试！', '🎉')) +
+    '</section>';
+  }
+
+  /* ------------------------------------------------------------------ 视图 5：档案与教材地图 */
+  function renderEvidencePage() {
+    var host = document.getElementById('view');
+    var sorted = WB.exps.slice().sort(function (a, b) { return a.no - b.no; });
+    var done = sorted.filter(function (e) { return Boolean(WB.evidence[e.id]); }).length;
+
+    var rows = sorted.map(function (e) {
+      var ev = WB.evidence[e.id];
+      var m = EXP_META[e.id] || { emoji: '●', short: e.title };
+      return [
+        m.emoji + ' M' + e.no + ' ' + e.title,
+        { html: ev ? Q.badge(ev.pass ? 'pass' : 'warn', ev.pass ? '✅ 达标过关' : '📌 未达门槛') : Q.badge('mute', '未打卡') },
+        { html: ev ? Q.esc(ev.summary || '已记录') : '<span class="muted">先去体验再点击「记为过关档案」</span>' },
+        { html: '<button type="button" class="btn sm" data-nav="exp/' + e.id + '">' + (ev ? '去看看' : '去闯关') + '</button>' }
+      ];
+    });
+
+    var kbRows = sorted.map(function (e) {
+      var m = EXP_META[e.id] || { emoji: '🎯', plain: e.hook };
+      return [
+        { html: '<span class="chapter-tag">' + Q.esc(e.chapter) + '</span>' },
+        m.emoji + ' M' + e.no + ' ' + e.title,
+        m.plain,
+        { html: '<button type="button" class="link" data-nav="exp/' + e.id + '">直达关卡 →</button>' }
+      ];
+    });
+
+    host.innerHTML = '<section class="exp">' +
+      Q.kpiStrip([
+        { icon: '🏆', label: '通关档案进度', value: done + ' / ' + sorted.length, sub: 'M1~M7 的结果会自动喂给 M8 发布门禁', tone: done >= 8 ? 'ok' : 'blue' },
+        { icon: '🚩', label: '参赛团队', value: '泰山新松队', sub: '青蓝 QA Lab v' + WB.version, tone: 'teal' }
+      ]) +
+      '<div class="card">' +
+        '<div class="card-h">' +
+          '<span class="card-t">📦 我的过关实验档案</span>' +
+          '<div class="btn-row">' +
+            '<button type="button" class="btn sm primary" data-act="export-all">📤 导出 JSON 档案</button>' +
+            '<button type="button" class="btn sm" data-act="import-all">📥 导入 JSON</button>' +
+            '<button type="button" class="btn sm" data-act="clear-all">🗑️ 全部清空</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card-b flush">' + Q.table(['关卡', '过关状态', '记录内容摘要', '直达'], rows) + '</div>' +
+      '</div>' +
+      Q.drawer('📚 《软件质量保证与测试：原理技术与实践》教材对应地图（点击展开）', '8 关对照表', Q.table(['教材章节', '实训关卡', '一句话大白话说明', '跳转'], kbRows), false) +
+    '</section>';
+  }
+
+  function renderAboutPage() {
+    renderEvidencePage();
+  }
+
+  /* ------------------------------------------------------------------ 导出 / 导入 / 引导 */
+  function doExport() {
+    var payload = {
+      schema: SCHEMA,
+      version: WB.version,
+      exportedAt: new Date().toISOString(),
+      evidence: WB.evidence,
+      state: WB.state,
+      quizAnswers: WB.quizAnswers
+    };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'qinglan-qa-archive-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    toast('已导出学习与过关档案 JSON');
+  }
+
+  function doImportFile(file) {
+    if (!file) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      try {
+        var obj = JSON.parse(String(rd.result || ''));
+        if (!obj || typeof obj !== 'object' || obj.schema !== SCHEMA) {
+          toast('导入被拒绝：不是本平台合法档案格式', 'fail');
+          return;
+        }
+        if (obj.evidence) WB.evidence = obj.evidence;
+        if (obj.state) WB.state = obj.state;
+        if (obj.quizAnswers) WB.quizAnswers = obj.quizAnswers;
+        saveStore();
+        render();
+        toast('档案导入成功！');
+      } catch (e) {
+        toast('导入失败：JSON 文件格式不对', 'fail');
+      }
+    };
+    rd.readAsText(file);
+  }
+
+  function openGuide() {
+    var overlay = document.getElementById('guide-overlay');
+    if (!overlay) return;
+    var step = 0;
+    var steps = [
+      {
+        t: '① 像玩游戏一样点开任意一关',
+        b: '页面顶部 1~8 号胶囊就是 8 个独立小游戏。不用先背定义，直接点进你想玩的一关，点亮卡片、扫一扫代码或踩踩边界！'
+      },
+      {
+        t: '② 看懂底部「大白话教练气泡」',
+        b: '每当你点了一个按钮或改了开关，下方卡通气泡都会用最直白的话告诉你：为什么报错、哪里会漏虫。需要细调才点「高级调节」。'
+      },
+      {
+        t: '③ 攒齐档案，通关随堂挑战',
+        b: '玩出满意结果时点右上角「📌 记为过关档案」，第 8 关「发布门禁」会自动收集前 7 关战果帮你拍板能不能发布！'
+      }
+    ];
+    function paint() {
+      var cur = steps[step];
+      var bars = steps.map(function (_, i) { return '<i' + (i <= step ? ' class="on"' : '') + '></i>'; }).join('');
+      overlay.innerHTML = '<div class="modal" role="dialog" aria-modal="true">' +
+        '<div class="modal-h"><h2>' + Q.esc(cur.t) + '</h2></div>' +
+        '<div class="modal-b"><div class="guide-steps">' + bars + '</div><p>' + Q.esc(cur.b) + '</p></div>' +
+        '<div class="modal-f">' +
+          '<button type="button" class="btn ghost" data-g="close">跳过</button>' +
+          (step > 0 ? '<button type="button" class="btn" data-g="prev">上一步</button>' : '') +
+          '<button type="button" class="btn primary" data-g="' + (step < steps.length - 1 ? 'next' : 'close') + '">' +
+            (step < steps.length - 1 ? '下一步 →' : '开始玩！') +
+          '</button>' +
+        '</div></div>';
+      overlay.hidden = false;
+    }
+    overlay.onclick = function (ev) {
+      var btn = ev.target.closest('[data-g]');
+      if (!btn && ev.target !== overlay) return;
+      var g = btn ? btn.getAttribute('data-g') : 'close';
+      if (g === 'next') { step++; paint(); }
+      else if (g === 'prev') { step--; paint(); }
+      else { overlay.hidden = true; WB.session.guideSeen = true; }
+    };
+    paint();
+  }
+
+  /* ------------------------------------------------------------------ 全局事件委派 */
+  function wireGlobalEvents() {
+    document.addEventListener('click', function (ev) {
+      var navEl = ev.target.closest('[data-nav]');
+      if (navEl) {
+        go(navEl.getAttribute('data-nav'));
+        return;
+      }
+      var pbtn = ev.target.closest('button[data-p]');
+      if (pbtn) {
+        var rr = parseHash();
+        if (rr.view === 'exp' && WB.byId[rr.id]) {
+          var k = pbtn.getAttribute('data-p');
+          var v = pbtn.getAttribute('data-v');
+          Array.prototype.forEach.call(pbtn.parentElement.querySelectorAll('button[data-p]'), function (b) {
+            b.classList.toggle('on', b === pbtn);
+          });
+          applyExpParam(WB.byId[rr.id], k, v, pbtn);
+          return;
+        }
+      }
+      var actEl = ev.target.closest('[data-act]');
+      if (!actEl) return;
+      var act = actEl.getAttribute('data-act');
+
+      if (act === 'help') { openGuide(); return; }
+      if (act === 'export-all') { doExport(); return; }
+      if (act === 'import-all') {
+        var inp = document.getElementById('import-file');
+        if (inp) { inp.value = ''; inp.click(); }
+        return;
+      }
+      if (act === 'clear-all') {
+        WB.evidence = {}; WB.state = {}; WB.quizAnswers = {}; WB.quizDrafts = {};
+        saveStore();
+        render();
+        toast('已重置所有关卡与答题记录');
+        return;
+      }
+
+      /* 实验页头按钮 */
+      var r = parseHash();
+      if (r.view === 'exp' && WB.byId[r.id]) {
+        var exp = WB.byId[r.id];
+        if (act === 'exp-tab') {
+          WB.session.tab[exp.id] = actEl.getAttribute('data-t') || 'lab';
+          renderExpPage(exp.id);
+          return;
+        }
+        if (act === 'record-evidence') {
+          var st = ensureState(exp);
+          var res = exp.compute(st, WB);
+          var evData = exp.evidence(res, st, WB);
+          WB.evidence[exp.id] = evData;
+          saveStore();
+          renderExpPage(exp.id);
+          refreshNav();
+          toast('已记录第 ' + exp.no + ' 关过关档案：' + (evData.pass ? '达标' : '已存档'));
+          return;
+        }
+        if (act === 'reset-exp') {
+          WB.state[exp.id] = clone(exp.defaults || {});
+          saveStore();
+          renderExpPage(exp.id);
+          toast('已恢复第 ' + exp.no + ' 关默认状态');
+          return;
+        }
+      }
+
+      /* 随堂测试交互 */
+      if (act === 'quiz-pick') {
+        var qid = actEl.getAttribute('data-qid');
+        WB.quizAnswers[qid] = parseInt(actEl.getAttribute('data-opt'), 10);
+        saveStore();
+        rerenderQuizHost(r);
+        return;
+      }
+      if (act === 'quiz-toggle') {
+        var mqid = actEl.getAttribute('data-qid');
+        var optIdx = parseInt(actEl.getAttribute('data-opt'), 10);
+        var cur = Array.isArray(WB.quizDrafts[mqid]) ? WB.quizDrafts[mqid].slice() : [];
+        var idx = cur.indexOf(optIdx);
+        if (idx >= 0) cur.splice(idx, 1); else cur.push(optIdx);
+        WB.quizDrafts[mqid] = cur;
+        rerenderQuizHost(r);
+        return;
+      }
+      if (act === 'quiz-submit-multi') {
+        var sqid = actEl.getAttribute('data-qid');
+        var d = WB.quizDrafts[sqid] || [];
+        if (d.length) {
+          WB.quizAnswers[sqid] = d.slice().sort(function (a, b) { return a - b; });
+          delete WB.quizDrafts[sqid];
+          saveStore();
+          rerenderQuizHost(r);
+        }
+        return;
+      }
+      if (act === 'quiz-submit-fill') {
+        var fqid = actEl.getAttribute('data-qid');
+        var finp = document.querySelector('[data-q-fill="' + fqid + '"]');
+        var rawVal = finp ? finp.value.trim() : (WB.quizDrafts[fqid] || '').trim();
+        if (!rawVal) { toast('先填一个关键词或数字再提交吧', 'warn'); return; }
+        WB.quizAnswers[fqid] = rawVal;
+        delete WB.quizDrafts[fqid];
+        saveStore();
+        rerenderQuizHost(r);
+        return;
+      }
+      if (act === 'quiz-clear') {
+        var cqid = actEl.getAttribute('data-qid');
+        delete WB.quizAnswers[cqid];
+        delete WB.quizDrafts[cqid];
+        saveStore();
+        rerenderQuizHost(r);
+        return;
+      }
+      if (act === 'quiz-clear-exp') {
+        var eid = actEl.getAttribute('data-eid');
+        Q.quizByExp(eid).forEach(function (q) {
+          delete WB.quizAnswers[q.id]; delete WB.quizDrafts[q.id];
+        });
+        saveStore();
+        rerenderQuizHost(r);
+        toast('已清空本关随堂小题作答记录');
+        return;
+      }
+      if (act === 'quiz-filter') {
+        var fk = actEl.getAttribute('data-fk');
+        var fv = actEl.getAttribute('data-fv');
+        if (fk === 'wrongOnly') WB.quizFilter.wrongOnly = !WB.quizFilter.wrongOnly;
+        else WB.quizFilter[fk] = fv;
+        renderQuizPage();
+        return;
+      }
+      if (act === 'quiz-reset') {
+        WB.quizAnswers = {}; WB.quizDrafts = {};
+        saveStore();
+        renderQuizPage();
+        refreshNav();
+        toast('已清空随堂挑战作答记录');
+        return;
+      }
+
+      if (r.view === 'exp' && WB.byId[r.id] && WB.byId[r.id].onAction) {
+        var curExp = WB.byId[r.id];
+        var curSt = ensureState(curExp);
+        var actRes = curExp.onAction(act, actEl, curSt, WB, function (rebuildAll) {
+          saveStore();
+          updateExpStage(curExp, Boolean(rebuildAll));
+        });
+        if (actRes === 'sync-ctrl' || actEl.closest('#exp-ctrl-host')) {
+          saveStore();
+          updateExpStage(curExp, true);
+        } else if (actRes === true) {
+          saveStore();
+          updateExpStage(curExp, false);
+        }
+      }
+    });
+
+    document.addEventListener('input', function (ev) {
+      var finp = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-q-fill');
+      if (finp) { WB.quizDrafts[finp] = ev.target.value; return; }
+      var t = ev.target;
+      if (t && t.getAttribute && t.getAttribute('data-p') !== null) {
+        var r = parseHash();
+        if (r.view === 'exp' && WB.byId[r.id] && (t.type === 'range' || t.type === 'text' || t.type === 'number')) {
+          var val = (t.type === 'range' || t.type === 'number') ? Number(t.value) : t.value;
+          applyExpParam(WB.byId[r.id], t.getAttribute('data-p'), val, t);
+        }
+      }
+    });
+
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' && ev.target && ev.target.getAttribute && ev.target.getAttribute('data-q-fill')) {
+        var qid = ev.target.getAttribute('data-q-fill');
+        var btn = document.querySelector('[data-act="quiz-submit-fill"][data-qid="' + qid + '"]');
+        if (btn) btn.click();
+      }
+    });
+
+    document.addEventListener('change', function (ev) {
+      var t = ev.target;
+      if (t && t.id === 'import-file' && t.files && t.files[0]) {
+        doImportFile(t.files[0]);
+        return;
+      }
+      if (t && t.getAttribute && t.getAttribute('data-p') !== null) {
+        var r = parseHash();
+        if (r.view === 'exp' && WB.byId[r.id]) {
+          var exp = WB.byId[r.id];
+          var k = t.getAttribute('data-p');
+          if (t.type === 'checkbox' && t.getAttribute('data-multi')) {
+            var st = ensureState(exp);
+            var arr = Array.isArray(st[k]) ? st[k].slice() : [];
+            if (t.checked) { if (arr.indexOf(t.value) < 0) arr.push(t.value); }
+            else arr = arr.filter(function (x) { return x !== t.value; });
+            applyExpParam(exp, k, arr, t);
+          } else if (t.type === 'checkbox') {
+            applyExpParam(exp, k, Boolean(t.checked), t);
+          } else if (t.tagName === 'SELECT') {
+            applyExpParam(exp, k, t.value, t);
+          }
+        }
+      }
+    });
+  }
+
+  function rerenderQuizHost(route) {
+    refreshNav();
+    if (route.view === 'quiz') renderQuizPage();
+    else if (route.view === 'exp' && route.id) renderExpPage(route.id);
+  }
+
+  /* ------------------------------------------------------------------ 总渲染 & 启动 */
+  function render() {
+    clearAnim();
+    var r = parseHash();
+    refreshNav();
+    if (r.view === 'overview') renderOverview();
+    else if (r.view === 'graph') renderGraphPage();
+    else if (r.view === 'quiz') renderQuizPage();
+    else if (r.view === 'evidence') renderEvidencePage();
+    else if (r.view === 'about') renderAboutPage();
+    else if (r.view === 'exp') renderExpPage(r.id);
+    refreshNav();
+  }
+
+  function boot() {
+    loadStore();
+    var app = document.getElementById('app');
+    app.innerHTML = '<div class="app-wrap">' +
+      buildHeader() +
+      buildTopTabs() +
+      '<main class="stage"><div id="view" class="view"></div></main>' +
+    '</div>' +
+    '<div id="guide-overlay" class="overlay" hidden></div>' +
+    '<div id="toast-host" aria-live="polite"></div>';
+
+    wireGlobalEvents();
     window.addEventListener('hashchange', render);
     render();
-
-    var seen = false;
-    try { seen = window.localStorage.getItem('qinglan.guide.seen') === '1'; } catch (e) { seen = false; }
-    if (!seen) openGuide(0, true);
-
-    if (!store.ok) showStoreWarn();
+    if (WB.session.memOnly) toast('浏览器禁止了本地存储，已自动切换为内存临时模式', 'warn');
   }
 
-  WB.act = handleAction;
-  WB.render = render;
-  WB.storeOk = store.ok;
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-  else setTimeout(boot, 0);
+  else boot();
 })();

@@ -1,404 +1,213 @@
 /* ============================================================================
- * m6.js — 实验六：白盒测试与覆盖分析
- * 代码视图由被测函数源码实时解析；覆盖率来自插桩轨迹；CFG 为显式声明的视图布局。
+ * m6.js — 第 6 关：白盒电路点亮游乐场
  * ==========================================================================*/
 (function () {
   'use strict';
-  var Q = window.QT, WB = window.WB;
-  var E = Q.esc;
+  var Q = window.QT;
 
-  /* CFG 视图布局（只影响画在哪，不影响结构；结构来自 QT.WB_CFG） */
-  var POS = {
-    B01: [400, 22], B02: [110, 74], B03: [400, 74],
-    B04: [292, 126], B05: [508, 126], B06: [400, 178],
-    B07: [130, 232], B08: [310, 232], B09: [490, 232], B10: [670, 232],
-    B11: [270, 290], B12: [530, 290],
-    B13: [400, 344], B14: [400, 394], B15: [400, 444],
-    B16: [292, 498], B17: [508, 498], B18: [400, 552]
+  var NODE_POS = {
+    B01: { x: 75, y: 120 }, B02: { x: 75, y: 225 }, B03: { x: 185, y: 120 },
+    B04: { x: 185, y: 45 }, B05: { x: 185, y: 195 }, B06: { x: 300, y: 120 },
+    B07: { x: 425, y: 36 }, B08: { x: 425, y: 92 }, B09: { x: 425, y: 148 }, B10: { x: 425, y: 204 },
+    B11: { x: 555, y: 74 }, B12: { x: 555, y: 166 }, B13: { x: 660, y: 120 },
+    B14: { x: 750, y: 120 }, B15: { x: 750, y: 45 }, B16: { x: 855, y: 45 },
+    B17: { x: 855, y: 195 }, B18: { x: 855, y: 120 }
   };
-  var NW = 54, NH = 22;
 
-  function inputsOf(st) {
-    var list = [];
-    (st.cases || []).forEach(function (id) {
-      var u = Q.WB_LIBRARY.filter(function (x) { return x.id === id; })[0];
-      if (u) list.push({ id: id, label: u.label, input: u.input });
-    });
-    (st.custom || []).forEach(function (c, i) {
-      list.push({ id: 'C' + (i + 1), label: '自定义用例 ' + (i + 1), input: c, custom: true });
-    });
-    return list;
-  }
-
-  function compute(st) {
-    var list = inputsOf(st);
-    var autoInfo = null;
-    if (st.autoBudget && st.autoBudget > 0) {
-      var g = Q.wbGreedyMinSet(Q.WB_POOL, st.criterion, st.defect === 'none' ? null : st.defect);
-      var pick = g.cases.slice(0, st.autoBudget);
-      var seen = {};
-      list.forEach(function (x) { seen[JSON.stringify(x.input)] = true; });
-      pick.forEach(function (inp, i) {
-        var k = JSON.stringify(inp);
-        if (seen[k]) return;
-        seen[k] = true;
-        list.push({ id: 'A' + (i + 1), label: '自动补齐用例 ' + (i + 1), input: inp, auto: true });
-      });
-      autoInfo = { budget: st.autoBudget, added: list.filter(function (x) { return x.auto; }).length, need: g.cases.length };
-    }
-    var runs = list.map(function (c) { return Q.wbRunOne(c.input, st.defect === 'none' ? null : st.defect); });
-    var a = Q.wbAnalyze(runs);
-    var status = Q.wbCriterionStatus(a, st.criterion);
-
-    // 用当前用例集探测 4 个缺陷的可检出性（与注入无关）
-    var hitDefects = {};
-    list.forEach(function (c) {
-      Q.defectProbe(c.input).forEach(function (p) { if (p.differs) hitDefects[p.id] = true; });
-    });
-
+  function makeDefaults() {
     return {
-      cases: list, runs: runs, a: a, status: status, autoInfo: autoInfo,
-      hitDefects: Object.keys(hitDefects),
-      defectCount: Object.keys(hitDefects).length
+      criterion: 'decision',
+      selectedIds: ['U1', 'U2', 'U3', 'U4'],
+      defects: ['SEAT_BOUNDARY', 'COUPON_CAP'],
+      stepIdx: -1
     };
   }
 
-  /* ------------------------------------------------------------- 代码视图 */
-  function codeView(a) {
-    var out = ['<div class="codeview">'];
-    a.parsed.lines.forEach(function (l) {
-      var cls = 'code-line';
-      if (l.kind === 'instr') cls += ' instr';
-      if (l.kind === 'mut') cls += ' mut';
-      if (l.kind === 'code' && l.block) cls += a.hitBlocks[l.block] ? ' hit' : ' miss';
-      out.push('<div class="' + cls + '">' +
-        '<span class="cl-no">' + l.no + '</span>' +
-        '<span class="cl-tx">' + E(l.text || ' ') + '</span>' +
-        (l.target ? '<span class="cl-badge">' + E(l.target) + ' ' + E(Q.WB_BLOCK_DESC[l.target] || '') + '</span>' : '') +
-        (l.dec ? '<span class="cl-badge">判定 ' + E(l.dec) + '</span>' : '') +
-        (l.cond ? '<span class="cl-badge">条件 ' + E(l.cond) + '</span>' : '') +
-        '</div>');
-    });
-    out.push('</div>');
-    return out.join('');
+  function buildParams() {
+    return [
+      {
+        key: 'criterion', label: '通关点亮标准（由松到严）', type: 'pills', wide: true,
+        options: [
+          { v: 'statement', l: '1️⃣ 语句块全亮' },
+          { v: 'decision', l: '2️⃣ 岔口真/假全亮' },
+          { v: 'condition', l: '3️⃣ 小条件全亮' },
+          { v: 'dc', l: '4️⃣ 判定+条件双满' }
+        ]
+      },
+      { type: 'action', action: 'wb-minset', label: '⚡ 一键凑齐最少通关用例', variant: 'primary' },
+      { type: 'action', action: 'wb-animate', label: '▶️ 逐条点亮电路演示', variant: 'fun' },
+      { type: 'action', action: 'wb-default', label: '↺ 退回初始 4 条', variant: '' },
+      {
+        key: 'defects', label: '注入代码隐藏Bug（用来对比变异分支）', type: 'checks', advanced: true,
+        options: Q.DEFECTS.map(function (d) { return { v: d.id, l: d.id + ' ' + d.short }; })
+      }
+    ];
   }
 
-  /* ----------------------------------------------------------------- CFG */
-  function cfgSvg(a) {
-    var W = 780, H = 590;
-    var out = ['<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '" role="img" aria-label="控制流图">'];
-    out.push('<defs><marker id="cfg-arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#94a3b8"/></marker></defs>');
-    var edges = Q.WB_CFG.edges;
-    Object.keys(edges).forEach(function (from) {
-      var p1 = POS[from];
-      if (!p1) return;
-      edges[from].forEach(function (to) {
-        var p2 = POS[to];
-        if (!p2) return;
-        var dx = p2[0] - p1[0], dy = p2[1] - p1[1];
-        var tt = Math.min((NW / 2) / (Math.abs(dx) || 1e-6), (NH / 2) / (Math.abs(dy) || 1e-6));
-        var ax = p1[0] + dx * tt, ay = p1[1] + dy * tt;
-        var bx = p2[0] - dx * tt, by = p2[1] - dy * tt;
-        var hot = a.hitBlocks[from] && a.hitBlocks[to];
-        out.push('<path d="M ' + ax.toFixed(1) + ' ' + ay.toFixed(1) + ' L ' + bx.toFixed(1) + ' ' + by.toFixed(1) +
-          '" stroke="' + (hot ? '#0d9488' : '#cbd5e1') + '" stroke-width="' + (hot ? 1.8 : 1.1) + '" fill="none" marker-end="url(#cfg-arw)"/>');
+  function compute(st) {
+    var selected = Q.WB_LIBRARY.filter(function (c) { return (st.selectedIds || []).indexOf(c.id) >= 0; });
+    var runs = selected.map(function (c) {
+      return Object.assign({ id: c.id, short: c.short, label: c.label }, Q.wbRunOne(c.input, st.defects));
+    });
+    var analysis = Q.wbAnalyze(runs);
+    var status = Q.wbCriterionStatus(analysis, st.criterion);
+    return { selected: selected, runs: runs, analysis: analysis, status: status };
+  }
+
+  function renderCfgSvg(res, stepRun) {
+    var W = 930, H = 260;
+    var hitB = res.analysis.hitBlocks || {};
+    var stepMap = {};
+    if (stepRun) stepRun.blocks.forEach(function (b) { stepMap[b] = true; });
+
+    var svg = [];
+    svg.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="计费函数控制流电路图">');
+    /* 连线 */
+    Object.keys(Q.WB_CFG.edges).forEach(function (from) {
+      var a = NODE_POS[from];
+      if (!a) return;
+      Q.WB_CFG.edges[from].forEach(function (to) {
+        var b = NODE_POS[to];
+        if (!b) return;
+        var lit = Boolean(hitB[from] && hitB[to]);
+        var hot = Boolean(stepMap[from] && stepMap[to]);
+        var stroke = hot ? '#f59e0b' : (lit ? '#0e9f8a' : '#cbd5e1');
+        var cls = hot ? 'fsm-edge-active' : '';
+        svg.push('<line class="' + cls + '" x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '" stroke="' + stroke + '" stroke-width="' + (hot ? 3.2 : (lit ? 2.2 : 1.3)) + '" ' + (hot ? 'stroke-dasharray="5 3"' : (!lit ? 'stroke-dasharray="4 3"' : '')) + '/>');
       });
     });
-    Object.keys(POS).forEach(function (id) {
-      var p = POS[id];
-      var hit = !!a.hitBlocks[id];
-      out.push('<g><rect x="' + (p[0] - NW / 2) + '" y="' + (p[1] - NH / 2) + '" width="' + NW + '" height="' + NH +
-        '" rx="8" fill="' + (hit ? '#ecfeff' : '#fef2f2') + '" stroke="' + (hit ? '#0d9488' : '#fca5a5') + '" stroke-width="1.35"/>' +
-        '<text x="' + p[0] + '" y="' + (p[1] + 3.5) + '" font-size="9.5" font-weight="600" text-anchor="middle" font-family="monospace" fill="' +
-        (hit ? '#0f766e' : '#b91c1c') + '">' + id + '</text></g>');
+
+    /* 电路节点 B01..B18 */
+    Object.keys(NODE_POS).forEach(function (bid) {
+      var p = NODE_POS[bid];
+      var lit = Boolean(hitB[bid]);
+      var hot = Boolean(stepMap[bid]);
+      var fill = hot ? '#fffbeb' : (lit ? '#ecfdf5' : '#f8fafc');
+      var stroke = hot ? '#f59e0b' : (lit ? '#10b981' : '#94a3b8');
+      var tcol = hot ? '#b45309' : (lit ? '#065f46' : '#64748b');
+      svg.push('<rect x="' + (p.x - 27) + '" y="' + (p.y - 14) + '" width="54" height="28" rx="9" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + (hot ? 2.6 : 1.8) + '"' + (!lit && !hot ? ' stroke-dasharray="3 2"' : '') + '/>');
+      svg.push('<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle" font-size="11" font-weight="800" font-family="monospace" fill="' + tcol + '">' + bid + '</text>');
     });
-    out.push('</svg>');
-    return '<div class="chart-box cfg-box">' + out.join('') + '</div>' +
-      '<div class="chart-cap">青色 = 已执行基本块，珊瑚红 = 未执行基本块。共 18 块 / ' + Q.WB_TOTAL_PATHS + ' 条路径。</div>';
+    svg.push('</svg>');
+    return svg.join('');
   }
 
   function viz(res, st) {
-    var a = res.a;
-    var h = '';
-    h += '<section class="card"><h3 class="card-h">实时反馈 · 覆盖仪表<span class="card-hint">' +
-      res.cases.length + ' 条用例，' + a.paths.covered + ' 条不同路径</span></h3><div class="card-b">';
-    h += '<div class="metrics mb10">' +
-      '<div class="metric"><div class="m-l">语句块覆盖</div><div class="m-v">' + Q.num(a.blocks.rate, 1) + '<small>%</small></div>' +
-      '<div class="tiny muted">' + a.blocks.covered + '/' + a.blocks.total + ' 块</div></div>' +
-      '<div class="metric' + (st.criterion === 'decision' ? ' hl' : '') + '"><div class="m-l">判定覆盖</div><div class="m-v">' + Q.num(a.decisions.rate, 1) + '<small>%</small></div>' +
-      '<div class="tiny muted">' + a.decisions.covered + '/' + a.decisions.total + '（7 判定 × 2）</div></div>' +
-      '<div class="metric' + (st.criterion === 'condition' ? ' hl' : '') + '"><div class="m-l">条件覆盖</div><div class="m-v">' + Q.num(a.conditions.rate, 1) + '<small>%</small></div>' +
-      '<div class="tiny muted">' + a.conditions.covered + '/' + a.conditions.total + '（12 条件 × 2）</div></div>' +
-      '<div class="metric' + (st.criterion === 'dc' ? ' hl' : '') + '"><div class="m-l">判定-条件覆盖</div><div class="m-v">' + Q.num(a.dc.rate, 1) + '<small>%</small></div>' +
-      '<div class="tiny muted">' + a.dc.covered + '/' + a.dc.total + '</div></div>' +
-      '<div class="metric' + (st.criterion === 'path' ? ' hl' : '') + '"><div class="m-l">路径覆盖</div><div class="m-v">' + Q.num(a.paths.rate, 1) + '<small>%</small></div>' +
-      '<div class="tiny muted">' + a.paths.covered + '/' + a.paths.total + ' 条</div></div>' +
-      '</div>';
-    h += '<p class="tiny muted mt6">当前准则：<b>' + E((Q.WB_CRITERIA.filter(function (c) { return c.key === st.criterion; })[0] || {}).label || '') +
-      '</b>（' + res.status.value + ' / ' + res.status.total + '）。分母口径见左侧理论要点。</p>';
-    if (res.autoInfo) {
-      h += '<div class="callout"><b>自动补齐：</b>预算 ' + res.autoInfo.budget + ' 条，新增 ' + res.autoInfo.added +
-        ' 条（贪心集合覆盖，达到该准则理论上至少需要 ' + res.autoInfo.need + ' 条）。贪心不是最优解。</div>';
-    }
-    h += '</div></section>';
+    var a = res.analysis;
+    var s = res.status;
+    var curIdx = (st.stepIdx >= 0 && st.stepIdx < res.runs.length) ? st.stepIdx : -1;
+    var stepRun = curIdx >= 0 ? res.runs[curIdx] : null;
 
-    h += '<details class="sec-card" open><summary class="sec-card-h"><span>控制流图</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">18 块 · ' + Q.WB_TOTAL_PATHS + ' 条路径</span><span class="sec-arrow">▾</span></span></summary>' +
-      '<div class="sec-card-b">' + cfgSvg(a) + '</div></details>';
+    var kpis = Q.kpiStrip([
+      { icon: s.passed ? '🎉' : '⚡', label: '当前通关准则结果', value: Q.pctText(s.rate), sub: s.value + '/' + s.total + (s.passed ? ' · 全绿达标！' : ' · 还差几个黑格子'), tone: s.passed ? 'ok' : 'warn' },
+      { icon: '🟩', label: '代码块点亮', value: Q.pctText(a.blocks.rate), sub: a.blocks.covered + ' / ' + a.blocks.total + ' 块已执行', tone: a.blocks.rate >= 100 ? 'ok' : 'blue' },
+      { icon: '🔀', label: '岔路口真假枝', value: Q.pctText(a.decisions.rate), sub: a.decisions.covered + ' / ' + a.decisions.total + ' 条枝', tone: a.decisions.rate >= 100 ? 'ok' : 'teal' },
+      { icon: '🧩', label: '原子条件覆盖', value: Q.pctText(a.conditions.rate), sub: a.conditions.covered + ' / ' + a.conditions.total + ' 项', tone: 'blue' }
+    ]);
 
-    h += '<details class="sec-card"><summary class="sec-card-h"><span>插桩代码视图（_calcFee 源码轨迹）</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">点击展开查看逐行命中高亮</span><span class="sec-arrow">▾</span></span></summary>' +
-      '<div class="sec-card-b">' +
-      codeView(a) +
-      '<div class="cv-legend">' +
-      '<span><i class="cv-swatch" style="background:#eefaf6;border-color:#14b8a6"></i>已执行块</span>' +
-      '<span><i class="cv-swatch" style="background:#fdf7f6;border-color:#e3b3ad"></i>未执行块</span>' +
-      '<span><i class="cv-swatch" style="background:#fbf6ea;border-color:#d9a441"></i>缺陷变异开关</span>' +
-      '<span><i class="cv-swatch" style="background:#fff;border-color:#e0e5e9"></i>覆盖率采集探针</span>' +
-      '</div>' +
-      '</div></details>';
+    /* 点击挑选用例电池板 */
+    var pills = Q.WB_LIBRARY.map(function (c) {
+      var on = (st.selectedIds || []).indexOf(c.id) >= 0;
+      return '<button type="button" class="pill-btn' + (on ? ' on' : '') + '" data-act="wb-toggle" data-id="' + c.id + '">' +
+        (on ? '💡 ' : '🔌 ') + c.id + ' · ' + Q.esc(c.short) + '</button>';
+    }).join('');
+    var bankCard = '<div class="card"><div class="card-h">' +
+      '<div><span class="card-t">🔋 点亮电路测试库（点击任意按钮通电 / 断电，看看哪盏暗灯亮了！）</span></div>' +
+      '<span class="badge mute">已插 ' + res.runs.length + ' / ' + Q.WB_LIBRARY.length + ' 颗电池</span></div>' +
+      '<div class="card-b"><div class="qf-pills">' + pills + '</div></div></div>';
 
-    // 判定真值表 + 条件真值表并排收纳
-    var drow = a.decisions.items.map(function (d) {
-      return {
-        cells: [
-          { html: '<b>' + E(d.id) + '</b>' },
-          { v: d.desc },
-          { html: d.t ? Q.badge('pass', '真') : Q.badge('mute', '未') },
-          { html: d.f ? Q.badge('pass', '假') : Q.badge('mute', '未') },
-          { html: d.ok ? Q.badge('pass', '达标') : Q.badge('fail', '缺口') }
-        ]
-      };
-    });
-    var crow = a.conditions.items.map(function (c) {
-      return {
-        cells: [
-          { html: '<b>' + E(c.id) + '</b>' },
-          { v: c.desc },
-          { html: c.t ? '✓' : '·' },
-          { html: c.f ? '✓' : '·' }
-        ]
-      };
-    });
-    h += '<details class="sec-card"><summary class="sec-card-h"><span>判定与原子条件真值表</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">判定 ' + a.decisions.covered + '/' + a.decisions.total + ' · 条件 ' + a.conditions.covered + '/' + a.conditions.total + '</span><span class="sec-arrow">▾</span></span>' +
-      '</summary><div class="sec-card-b"><div class="grid g2">' +
-      '<div><div class="tiny muted mb6">判定真值表（7 个判定）</div><div class="tbl-scroll" style="max-height:300px">' + Q.table(['判定', '含义', 'T', 'F', '状态'], drow) + '</div></div>' +
-      '<div><div class="tiny muted mb6">条件真值表（12 个原子条件）</div><div class="tbl-scroll" style="max-height:300px">' + Q.table(['条件', '含义', 'T', 'F'], crow) + '</div></div>' +
-      '</div></div></details>';
+    var stepNotice = stepRun
+      ? '<div class="ball-drop-pill ok mt10"><span>⚡ 正在演示：' + Q.esc(stepRun.id + ' ' + stepRun.label) + ' → 刚刚点亮 ' + stepRun.blocks.length + ' 个电路节点（金黄高亮）</span></div>'
+      : '<div class="tiny muted mt10">💡 绿块 = 已跑到的代码 · 灰色虚线块 = 从没跑过的代码盲区（比如 B16 负值截断试着点亮 <b>U9 1/1 券500</b> 看看！）</div>';
 
-    // 执行路径与用例明细收纳
-    var rows = res.cases.map(function (c, i) {
-      var run = res.runs[i];
-      var out = run.out;
-      return {
-        cells: [
-          { html: '<b>' + E(c.id) + '</b>' + (c.auto ? ' <span class="chip">自动</span>' : '') },
-          { v: c.label },
-          { html: '<span class="mono tiny">' + c.input.hours + '/' + c.input.seats + '/' + c.input.coupon + '/' + c.input.type.charAt(0) + (c.input.hasCert ? '/证' : '') + '</span>' },
-          { html: '<span class="mono">' + (out.ok ? Q.fmtMoney(out.payable) : 'E_INPUT') + '</span>' },
-          { html: '<span class="num">' + run.blocks.length + '</span>' }
-        ]
-      };
-    });
-    h += '<details class="sec-card"><summary class="sec-card-h"><span>执行路径轨迹与用例明细</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">已走通 ' + a.paths.covered + ' 条路径 · 共 ' + res.cases.length + ' 条用例</span><span class="sec-arrow">▾</span></span>' +
-      '</summary><div class="sec-card-b">' +
-      '<div class="tiny muted mb6">已走通路径轨迹</div>' +
-      (a.paths.executed.length ? a.paths.executed.map(function (p, i) {
-        return '<div class="pathrow"><span class="chip">路径 ' + (i + 1) + '</span> <span class="mono tiny">' + E(p.split('>').join(' → ')) + '</span></div>';
-      }).join('') : Q.empty('尚未执行任何路径')) +
-      '<div class="tiny muted mt10 mb6">当前执行用例清单</div>' +
-      '<div class="tbl-scroll" style="max-height:280px">' +
-      Q.table(['用例', '说明', '输入（课时/人数/券/类型）', '应付', '命中块数'], rows) + '</div></div></details>';
+    var cfgCard = '<div class="card"><div class="card-h"><span class="card-t">💡 代码内部控制流电路图（揭开黑盒看程序怎么走）</span></div>' +
+      '<div class="card-b"><div class="cfg-box">' + renderCfgSvg(res, stepRun) + stepNotice + '</div></div></div>';
 
-    return h;
+    var coachBox = s.passed
+      ? Q.coach('ok', '电路全亮达标！你用 ' + res.runs.length + ' 条用例就攻克了目标',
+        '这就是白盒测试的精妙所在：<b>把代码内部所有分支和岔路口亮出来</b>，不浪费重复测试，专挑暗掉的角落（比如 B02 非法入口、B16 负数保护）精准补用例！')
+      : Q.coach('warn', '还有黑灯没亮！目前只点亮了 ' + s.value + ' / ' + s.total + ' 处',
+        '试试顺手点开 <b>U9 (券500负数保护)</b>、<b>U11 (0课时拦截)</b> 等黑灯泡，或者直接点击上面「⚡ 一键自动凑齐最少通关用例」看机器帮你挑出最省力气的一组！');
+
+    var srcHtml = '<div class="codeview">' + a.parsed.lines.slice(0, 60).map(function (l) {
+      var hit = l.block && a.hitBlocks[l.block];
+      return '<div class="code-line ' + (l.kind === 'instr' ? 'instr' : (hit ? 'hit' : 'miss')) + '">' +
+        '<span class="cl-no">' + l.no + '</span><span class="cl-tx">' + Q.esc(l.text || ' ') + '</span></div>';
+    }).join('') + '</div>';
+
+    return kpis + bankCard + cfgCard + coachBox +
+      Q.drawer('🔬 展开带探针的真实被测源码（绿行=执行过 · 红行=从未跑到）', a.parsed.lines.length + ' 行', srcHtml, false);
   }
 
-  function verify(res, st) {
-    var a = res.a;
-    var stt = res.status;
-    var critLabel = (Q.WB_CRITERIA.filter(function (c) { return c.key === st.criterion; })[0] || {}).label || '';
-    var missedDefects = Q.DEFECTS.filter(function (d) { return res.hitDefects.indexOf(d.id) < 0; });
-    var h = '<section class="card"><h3 class="card-h">结论验证区</h3><div class="card-b">';
-
-    h += Q.concl(stt.passed ? 'ok' : 'no',
-      (stt.passed ? '✓ ' : '✕ ') + critLabel + ' ' + stt.value + ' / ' + stt.total,
-      [
-        ['结构覆盖', res.cases.length + ' 条用例 · 路径 ' + a.paths.covered + ' 条 · 块 ' + a.blocks.covered + '/' + a.blocks.total + ' · 判定 ' + a.decisions.covered + '/' + a.decisions.total],
-        stt.passed ? null : ['未达标项', missText(a, st.criterion)]
-      ]);
-
-    h += Q.concl(res.defectCount === 4 ? 'ok' : 'no',
-      (res.defectCount === 4 ? '✓ ' : '✕ ') + '可检出 ' + res.defectCount + ' / 4 个故障',
-      [
-        ['已捕获', res.defectCount ? res.hitDefects.map(function (id) { return Q.DEFECT_MAP[id].short; }).join('、') : '当前用例集未捕获任何预设故障'],
-        missedDefects.length ? ['漏出项', missedDefects.map(function (d) { return d.short; }).join('、')] : null
-      ]);
-
-    if (a.blocks.rate === 100 && res.defectCount < 4) {
-      h += Q.concl('insight', '◆ 关键启发：100% 块覆盖仍有漏网缺陷',
-        [['发现', '所有语句均已执行，但仍有 ' + (4 - res.defectCount) + ' 处故障逃逸——“行跑过”不等于“逻辑算对”。']]);
+  function onAction(act, el, st, WB, update) {
+    if (act === 'wb-toggle') {
+      var id = el.getAttribute('data-id');
+      var cur = (st.selectedIds || []).slice();
+      var i = cur.indexOf(id);
+      if (i >= 0) cur.splice(i, 1); else cur.push(id);
+      st.selectedIds = cur;
+      st.stepIdx = -1;
+      return true;
     }
-
-    h += '</div></section>';
-    return h;
+    if (act === 'wb-default') {
+      st.selectedIds = ['U1', 'U2', 'U3', 'U4'];
+      st.stepIdx = -1;
+      return true;
+    }
+    if (act === 'wb-minset') {
+      var minRes = Q.wbGreedyMinSet(Q.WB_POOL, st.criterion, st.defects);
+      var matchedIds = [];
+      minRes.cases.forEach(function (inp) {
+        var found = Q.WB_LIBRARY.find(function (lib) { return JSON.stringify(lib.input) === JSON.stringify(inp); });
+        if (found) matchedIds.push(found.id);
+      });
+      st.selectedIds = matchedIds.length ? matchedIds : ['U1', 'U2', 'U5', 'U7', 'U9', 'U11'];
+      st.stepIdx = -1;
+      WB.toast('已为您自动挑出最少达标组合（仅需 ' + st.selectedIds.length + ' 条用例）！');
+      return true;
+    }
+    if (act === 'wb-animate') {
+      var total = (st.selectedIds || []).length;
+      if (!total) { WB.toast('先在电池板里点亮至少 1 条用例哦', 'warn'); return; }
+      if (WB.session.animTimer) clearInterval(WB.session.animTimer);
+      st.stepIdx = 0;
+      update(false);
+      WB.session.animTimer = setInterval(function () {
+        if (st.stepIdx + 1 >= total) {
+          clearInterval(WB.session.animTimer);
+          WB.session.animTimer = null;
+          return;
+        }
+        st.stepIdx += 1;
+        update(false);
+      }, 550);
+    }
   }
 
-  function missText(a, criterion) {
-    if (criterion === 'statement') return '未执行块：' + (a.blocks.missed.join('、') || '无');
-    if (criterion === 'decision') return '未达标判定：' + (a.decisions.missed.join('、') || '无');
-    if (criterion === 'condition') return '未达标条件：' + (a.conditions.missed.join('、') || '无');
-    if (criterion === 'dc') return '判定与条件的真假分支未同时满足，见上方真值表';
-    return '可枚举 ' + a.paths.total + ' 条路径，可观察路径增长成本';
+  function evidence(res) {
+    var dRate = res.analysis.decisions.rate || 0;
+    return {
+      status: res.status.passed ? 'pass' : 'warn',
+      pass: res.status.passed,
+      coverage: dRate,
+      label: '判定覆盖率',
+      defects: res.runs.some(function (r) { return r.id === 'U9'; }) ? ['COUPON_CAP'] : [],
+      summary: res.status.value + '/' + res.status.total + ' 达成准则，语句 ' + Q.pctText(res.analysis.blocks.rate) + ' / 判定 ' + Q.pctText(dRate),
+      metrics: { blocks: res.analysis.blocks.rate, decisions: dRate }
+    };
   }
 
-  WB.registerExp({
-    id: 'm6', no: 6, navLabel: '白盒覆盖',
-    title: '白盒测试与覆盖分析',
-    subtitle: '深入代码控制流与插桩轨迹，理解五大覆盖准则的差异及其证明力上限。',
-    chapter: '第8章 8.4 白盒测试技术',
-    knowledge: '区分语句/判定/条件/判定-条件/路径覆盖的定义与分母；用插桩轨迹度量覆盖；理解高覆盖不等于无缺陷。',
-    minutes: 16,
-    goals: [
-      '说清五种准则各自的分母',
-      '用最少用例达成指定覆盖',
-      '给出“覆盖满但仍有缺陷”的反例'
-    ],
-    blockers: [
-      ['语句覆盖高就是好', '只走真的那一支也能到 100%'],
-      ['判定覆盖 = 条件覆盖', '一个看整个 if，一个看每个原子条件'],
-      ['路径覆盖能做到 100%', '18 个块就有 33 条路径']
-    ],
-    theory: '<p>五个准则，五套分母。块是语句，判定是整个 if，条件是 if 里的每个原子判断。</p>' +
-      '<div class="formula">块 18 · 判定 7×2=14 · 条件 12×2=24\n' +
-      '判定-条件 38 · 路径 33</div>' +
-      '<p class="mt6">插桩只是量尺，不改变业务结果。</p>',
-    prereq: '控制流、判定与条件的区别。',
-    scopeNote: '单元级，对象是单个纯函数。',
-    notDo: '不做循环路径与数据流覆盖。',
+  function theory() {
+    return Q.coach('info', '一句话记牢白盒与覆盖准则',
+      '<b>把代码打开像查电路一样一行行点亮！</b>严苛程度排队：<b>块(语句)覆盖 &lt; 岔口(判定)覆盖 &lt; 原子条件覆盖 &lt; 判定-条件双满</b>。写最少测试用例点亮所有拐角就是高手！');
+  }
 
-    params: [
-      {
-        key: 'criterion', type: 'select', label: '覆盖准则',
-        options: Q.WB_CRITERIA.map(function (c) { return { v: c.key, l: c.label }; }),
-        hint: '决定达成判定与分母，也决定补齐目标。'
-      },
-      {
-        key: 'cases', type: 'checks', label: '用例库（勾选参与执行）', cols: 2,
-        options: Q.WB_LIBRARY.map(function (u) { return { v: u.id, l: u.id + ' ' + (u.short || u.label) }; }),
-        hint: '勾得越少，越看得清哪条补了哪个分支。'
-      },
-      {
-        key: 'defect', type: 'select', label: '被测版本（注入缺陷）',
-        options: [
-          { v: 'none', l: '无缺陷（规格实现）' },
-          { v: 'SEAT_BOUNDARY', l: 'D1 团体折扣下界判定错误' },
-          { v: 'ROUND_DOWN', l: 'D2 金额向下取整' },
-          { v: 'COUPON_CAP', l: 'D3 优惠券负值未截断（B16 不可达）' },
-          { v: 'RETRAIN_STACK', l: 'D4 折扣被叠加' }
-        ],
-        hint: 'D3 会让 B16 永远执行不到（上限 17/18）。'
-      },
-      {
-        key: 'autoBudget', type: 'select', label: '自动补齐预算',
-        options: [
-          { v: 0, l: '关闭（只用我勾选的用例）' },
-          { v: 4, l: '最多补 4 条' },
-          { v: 8, l: '最多补 8 条' },
-          { v: 12, l: '最多补 12 条' }
-        ],
-        hint: '贪心补齐，补进来的用例标“自动”。'
-      }
-    ],
-    defaults: {
-      criterion: 'decision',
-      cases: ['U1', 'U2', 'U3', 'U4'],
-      defect: 'none',
-      autoBudget: 0,
-      cHours: 11, cSeats: 3, cCoupon: 0, cType: 'new', cHasCert: true,
-      custom: []
-    },
-
-    compute: compute,
-    viz: function (res, st) { return viz(res, st) + customBlock(st); },
-    verify: verify,
-
-    onAction: function (name, arg, st) {
-      if (name === 'add-case') {
-        var h = st.cHours, s = st.cSeats, c = st.cCoupon;
-        var okNum = function (v, lo, hi) {
-          return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= lo && v <= hi;
-        };
-        if (!okNum(h, 0, 200)) { WB.toast('课时数需为 0–200 的整数（留空无效）', 'warn'); return false; }
-        if (!okNum(s, 0, 30)) { WB.toast('报名人数需为 0–30 的整数（留空无效）', 'warn'); return false; }
-        if (!okNum(c, 0, 600)) { WB.toast('券额需为 0–600 的整数（留空无效）', 'warn'); return false; }
-        st.custom = (st.custom || []).concat([{ hours: h, seats: s, coupon: c, type: st.cType, hasCert: !!st.cHasCert }]);
-        if (st.custom.length > 6) st.custom = st.custom.slice(-6);
-        WB.toast('已添加自定义用例');
-        return true;
-      }
-      if (name === 'del-case') {
-        st.custom = (st.custom || []).filter(function (_, i) { return String(i) !== String(arg); });
-        return true;
-      }
-      if (name === 'select-min') {
-        var g = Q.wbGreedyMinSet(Q.WB_POOL, st.criterion, st.defect === 'none' ? null : st.defect);
-        var ids = [];
-        g.cases.forEach(function (inp) {
-          var u = Q.WB_LIBRARY.filter(function (x) { return JSON.stringify(x.input) === JSON.stringify(inp); })[0];
-          if (u) ids.push(u.id);
-        });
-        st.cases = ids;
-        st.custom = [];
-        st.autoBudget = 0;
-        WB.toast('已按“' + (Q.WB_CRITERIA.filter(function (c) { return c.key === st.criterion; })[0] || {}).short +
-          '”选出 ' + ids.length + ' 条用例（贪心，不保证最优）');
-        return true;
-      }
-      return false;
-    },
-
-    evidence: function (res, st) {
-      var a = res.a;
-      var rate = st.criterion === 'statement' ? a.blocks.rate
-        : st.criterion === 'decision' ? a.decisions.rate
-        : st.criterion === 'condition' ? a.conditions.rate
-        : st.criterion === 'dc' ? a.dc.rate : a.paths.rate;
-      var status = rate === 100 ? 'pass' : rate >= 70 ? 'warn' : 'fail';
-      return {
-        status: status,
-        coverage: rate,
-        label: (Q.WB_CRITERIA.filter(function (c) { return c.key === st.criterion; })[0] || {}).label || st.criterion,
-        defects: res.hitDefects,
-        note: res.cases.length + ' 条用例；块 ' + a.blocks.covered + '/' + a.blocks.total +
-          '，判定 ' + a.decisions.covered + '/' + a.decisions.total +
-          '，条件 ' + a.conditions.covered + '/' + a.conditions.total +
-          '，路径 ' + a.paths.covered + '/' + a.paths.total
-      };
-    }
+  window.WB.registerExp({
+    id: 'm6', no: 6, group: '状态、结构与流水线',
+    title: '白盒电路 · 迷宫全亮', chapter: '第 4 章 · 白盒与覆盖分析',
+    hook: '看清代码内部分支电路，选最少测试用例把它全点亮',
+    goal: ['用亮灯图看清哪些代码从没被测过', '体会贪心最小集合怎样用最少的用例达标'],
+    defaults: makeDefaults(), params: buildParams,
+    compute: compute, viz: viz, onAction: onAction, evidence: evidence, theory: theory
   });
-
-  function customBlock(st) {
-    var opts = Q.CONFIG.types.map(function (t) { return { v: t, l: Q.CONFIG.typeLabels[t] }; });
-    return '<section class="card"><h3 class="card-h">自定义用例<span class="card-hint">' + (st.custom || []).length + ' 条</span></h3><div class="card-b">' +
-      '<div class="btn-row mb6"><button class="btn sm" data-act="select-min">按当前准则自动选最少用例</button>' +
-      '<span class="tiny muted">会覆盖上面的勾选（贪心算法，不保证全局最优）</span></div>' +
-      '<div class="cust-grid">' +
-      '<label>课时<input type="number" data-p="cHours" value="' + (st.cHours == null ? '' : st.cHours) + '" min="0" max="200" step="1"></label>' +
-      '<label>人数<input type="number" data-p="cSeats" value="' + (st.cSeats == null ? '' : st.cSeats) + '" min="0" max="30" step="1"></label>' +
-      '<label>券额<input type="number" data-p="cCoupon" value="' + (st.cCoupon == null ? '' : st.cCoupon) + '" min="0" max="600" step="1"></label>' +
-      '<label>类型<select data-p="cType">' + opts.map(function (o) {
-        return '<option value="' + o.v + '"' + (st.cType === o.v ? ' selected' : '') + '>' + o.l + '</option>';
-      }).join('') + '</select></label>' +
-      '<label>持证<select data-p="cHasCert"><option value="1"' + (st.cHasCert ? ' selected' : '') + '>是</option>' +
-      '<option value="0"' + (!st.cHasCert ? ' selected' : '') + '>否</option></select></label>' +
-      '<button class="btn primary sm" data-act="add-case">添加</button>' +
-      '</div>' +
-      ((st.custom || []).length ? '<div class="row wrap mt6">' + st.custom.map(function (c, i) {
-        return '<span class="chip">' + E(c.hours + '/' + c.seats + '/' + c.coupon + '/' + Q.CONFIG.typeLabels[c.type]) +
-          ' <button class="chip-x" data-act="del-case" data-arg="' + i + '" aria-label="删除">×</button></span>';
-      }).join('') + '</div>' : '') +
-      '</div></section>';
-  }
 })();

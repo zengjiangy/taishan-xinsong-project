@@ -3,5 +3,6 @@ node_modules/
 .wrangler/
 package-lock.json
 dist/
+03-课程AI工作台-参赛完整版.html
 .DS_Store
 Thumbs.db

@@ -1,297 +1,235 @@
 /* ============================================================================
- * m2.js — 实验二：等价类划分
+ * m2.js — 第 2 关：等价类划分（投篮分区游乐场）
  * ==========================================================================*/
 (function () {
   'use strict';
-  var Q = window.QT, WB = window.WB;
-  var E = Q.esc, C = Q.CONFIG;
+  var Q = window.QT;
 
-  var DEFECT_OPTS = Q.DEFECTS.map(function (d) {
-    return { v: d.id, l: d.short + ' ' + d.name };
-  });
+  var SAMPLE_BALLS = [
+    { label: '✅ 正常代表 · 11课时 1人', input: { hours: 11, seats: 1, coupon: 0, type: 'new', hasCert: true } },
+    { label: '🚧 下越界 · 0课时', input: { hours: 0, seats: 1, coupon: 0, type: 'new', hasCert: true } },
+    { label: '🔴 非整数 · 3.5课时', input: { hours: 3.5, seats: 1, coupon: 0, type: 'new', hasCert: true } },
+    { label: '⚠️ 2人团体边界（D1陷阱）', input: { hours: 11, seats: 2, coupon: 0, type: 'new', hasCert: true } },
+    { label: '💸 减200元券减成负数（D3陷阱）', input: { hours: 1, seats: 1, coupon: 500, type: 'new', hasCert: true } },
+    { label: '⚡ 3人+复训叠算（D4组合坑）', input: { hours: 11, seats: 3, coupon: 0, type: 'retrain', hasCert: true } }
+  ];
 
-  function compute(st) {
-    return Q.ecExecute({
-      field: st.field,
-      level: st.level,
-      strategy: st.strategy,
-      includeInvalid: !!st.includeInvalid,
-      defects: st.defects || [],
-      customCases: (st.custom || []).map(function (c) { return { input: c }; })
-    });
+  var DEFECT_PLAIN = {
+    SEAT_BOUNDARY: 'D1 · 2人错打团体95折',
+    ROUND_DOWN: 'D2 · 折后零头少算1元',
+    COUPON_CAP: 'D3 · 优惠券倒贴变负数',
+    RETRAIN_STACK: 'D4 · 团体与复训折上折'
+  };
+
+  function makeDefaults() {
+    return {
+      field: 'hours',
+      level: 'standard',
+      strategy: 'mid',
+      includeInvalid: true,
+      defects: ['SEAT_BOUNDARY', 'ROUND_DOWN', 'COUPON_CAP', 'RETRAIN_STACK'],
+      customCases: [],
+      lastBall: null,
+      ballSeq: 0
+    };
   }
 
-  /* ------------------------------------------------------------ 类分布图 */
-  function classMap(res) {
-    function bucket(c) {
-      if (c.validClass) return 'valid';
-      if (c.kind === 'nonint' || c.kind === 'invalidAll') return 'type';
-      if (c.lo == null) return 'low';
-      return 'high';
-    }
-    var groups = [
-      { key: 'low', label: '下界外（低于有效域）', items: [] },
-      { key: 'valid', label: '有效等价类', items: [] },
-      { key: 'high', label: '上界外（高于有效域）', items: [] },
-      { key: 'type', label: '类型 / 全集无效', items: [] }
+  function buildParams() {
+    return [
+      {
+        key: 'field', label: '先分哪个输入框的“组”', type: 'pills',
+        options: [
+          { v: 'hours', l: '⏱️ 培训课时 (1~120)' },
+          { v: 'seats', l: '👥 报名人数 (1~20)' },
+          { v: 'coupon', l: '🎟️ 优惠券 (0~500)' }
+        ]
+      },
+      {
+        key: 'strategy', label: '每组选谁当代表', type: 'pills',
+        options: [
+          { v: 'mid', l: '🎯 挑中间数' },
+          { v: 'boundary', l: '🚧 顺手卡边' }
+        ]
+      },
+      { type: 'action', action: 'combo-preset', label: '⚡ 一键试组合坑 (D4)', variant: 'primary' },
+      { key: 'level', label: '分组粗细', type: 'select', advanced: true, options: [{ v: 'coarse', l: '粗分（只分有效/无效）' }, { v: 'standard', l: '标准分组（推荐）' }, { v: 'fine', l: '细分拆小块' }] },
+      { key: 'includeInvalid', label: '包含非法/越界小组', type: 'checkbox', advanced: true, hint: '关掉就会漏测乱填的情况' },
+      {
+        key: 'defects', label: '系统里暗藏的 4 个 Bug', type: 'checks', advanced: true,
+        options: Q.DEFECTS.map(function (d) { return { v: d.id, l: DEFECT_PLAIN[d.id] || d.short }; })
+      }
     ];
-    var gm = {};
-    groups.forEach(function (g) { gm[g.key] = g; });
-    res.classes.forEach(function (c) { gm[bucket(c)].items.push(c); });
+  }
 
-    var used = {};
-    res.cases.forEach(function (c) { used[c.cls] = (used[c.cls] || 0) + 1; });
+  function evalBall(input, defects) {
+    var exp = Q.feeSpec(input);
+    var probe = Q.defectProbe(input).filter(function (p) { return p.differs; }).map(function (p) { return p.id; });
+    var active = probe.filter(function (id) { return defects.indexOf(id) >= 0; });
+    var act = active.length ? Q.calcWithDefects(input, active) : exp;
+    return {
+      input: input, expected: exp, actual: act, pass: active.length === 0,
+      hits: active, diff: active.length ? Q.compareFee(exp, act).join(' / ') : '账算得完全一致！'
+    };
+  }
 
-    var html = '<div class="clsmap">';
-    groups.forEach(function (g) {
-      if (!g.items.length) return;
-      html += '<div class="clsgroup"><div class="clsgroup-h">' + g.label + '</div><div class="clsrow">';
-      g.items.forEach(function (c) {
-        var n = used[c.id] || 0;
-        html += '<div class="cls' + (n ? ' on' : '') + '" title="' + E(c.name) + '">' +
-          '<div class="cls-id">' + E(c.id) + '</div>' +
-          '<div class="cls-nm">' + E(c.name) + '</div>' +
-          '<div class="cls-ct">' + (n ? '✓ ' + n + ' 例' : '○ 未覆盖') + '</div>' +
-          '</div>';
-      });
-      html += '</div></div>';
+  function compute(st) {
+    var r = Q.ecExecute({
+      field: st.field, level: st.level, strategy: st.strategy,
+      includeInvalid: st.includeInvalid, defects: st.defects, customCases: st.customCases
     });
-    html += '</div>';
-    return html;
+    var ballRes = st.lastBall ? evalBall(st.lastBall.input, st.defects) : null;
+    return { r: r, ball: ballRes, ballLabel: st.lastBall ? st.lastBall.label : '' };
   }
 
   function viz(res, st) {
-    var h = '';
-    var cov = res.coverage;
-    h += '<section class="card"><h3 class="card-h">实时反馈 · 等价类覆盖与检出<span class="card-hint">' +
-      (st.includeInvalid ? '含无效类' : '已排除无效类') + '</span></h3><div class="card-b">';
+    var r = res.r;
+    var cov = r.coverage;
 
-    h += '<div class="metrics mb10">' +
-      '<div class="metric"><div class="m-l">用例数</div><div class="m-v">' + res.cases.length + '</div></div>' +
-      '<div class="metric hl"><div class="m-l">等价类覆盖率</div><div class="m-v">' + Q.num(cov.rate, 1) + '<small>%</small></div></div>' +
-      '<div class="metric"><div class="m-l">无效类覆盖</div><div class="m-v">' + cov.invalidCovered + '<small>/' + cov.invalidTotal + '</small></div></div>' +
-      '<div class="metric"><div class="m-l">可检出缺陷</div><div class="m-v">' + res.detectedCount + '<small>/4</small></div></div>' +
-      '<div class="metric"><div class="m-l">失败用例</div><div class="m-v">' + res.failCount + '</div></div>' +
+    var kpis = Q.kpiStrip([
+      { icon: '🧺', label: '输入框分组覆盖率', value: Q.pctText(cov.rate), sub: '测了 ' + cov.covered + ' / ' + cov.total + ' 组', tone: cov.rate >= 100 ? 'ok' : 'warn' },
+      { icon: '🛡️', label: '乱填拦截测试', value: Q.pctText(cov.invalidRate), sub: cov.invalidCovered + ' / ' + cov.invalidTotal + ' 个非法桶', tone: st.includeInvalid ? 'ok' : 'bad' },
+      { icon: '💥', label: '测出账算错了', value: r.failCount + ' / ' + r.cases.length, sub: '实际跑出差异的用例数', tone: r.failCount > 0 ? 'warn' : 'blue' },
+      { icon: '🐛', label: '捕获暗藏 Bug', value: r.detectedCount + ' / ' + r.matrix.length, sub: '组合虫需加多字段用例', tone: r.detectedCount >= 4 ? 'ok' : 'blue' }
+    ]);
+
+    /* 互动投球小游乐场 */
+    var quickBtns = SAMPLE_BALLS.map(function (b, idx) {
+      return '<button type="button" class="btn sm" data-act="drop-sample" data-idx="' + idx + '">' + Q.esc(b.label) + '</button>';
+    }).join('');
+    var ballHtml = '';
+    if (res.ball) {
+      var b = res.ball;
+      var actErr = (b.actual.errors || []).join('、') || b.actual.code || '参数非法';
+      var actTxt = b.actual.ok ? ('收 ' + b.actual.payable + ' 元') : ('拒收(' + actErr + ')');
+      var expTxt = b.expected.ok ? ('应收 ' + b.expected.payable + ' 元') : ('应拒收');
+      ballHtml = '<div class="ball-drop-pill ' + (b.pass ? 'ok' : 'bad') + ' mt10">' +
+        '<span>' + (b.pass ? '🟢 安全落桶：' : '💥 抓到 Bug！') + Q.esc(res.ballLabel) + '</span>' +
+        '<span>· 理论' + Q.esc(expTxt) + '，被测系统 → ' + Q.esc(actTxt) + (b.pass ? '' : '（' + Q.esc(b.diff) + '）') + '</span>' +
       '</div>';
-
-
-    if (res.warn) h += '<div class="callout warn mt6">' + E(res.warn) + '</div>';
-
-    h += '<div class="clsmap-wrap mt10">' + classMap(res) + '</div>';
-    h += '<div class="chart-cap">实心卡片 = 已被用例覆盖，虚线卡片 = 一条都没有。分母是当前方案的类总数。</div>';
-
-    if (cov.missed.length) {
-      h += '<div class="callout warn mt6"><b>未覆盖的类：</b>' + E(cov.missed.join('、')) + '</div>';
+    } else {
+      ballHtml = '<div class="tiny muted mt10">👆 点上面任意一颗“测试球”丢进系统，立刻看它算对了还是踩坑报错！</div>';
     }
+    var ballStage = '<div class="ball-stage">' +
+      '<div style="width:100%"><div class="card-t mb6">🎲 测试球即时试玩（每颗球代表一“同类人群”）</div>' +
+      '<div class="btn-row">' + quickBtns + '</div>' + ballHtml + '</div>' +
+    '</div>';
 
-    h += '</div></section>';
+    /* 绿桶 & 红桶直观分布 */
+    function renderBuckets(list, title, emptyMsg) {
+      return '<div class="clsgroup"><div class="clsgroup-h">' + title + '</div><div class="clsrow">' +
+        (list.length ? list.map(function (c) {
+          var cnt = r.cases.filter(function (x) { return x.cls === c.id; }).length;
+          return '<div class="cls ' + (cnt ? 'on' : '') + '">' +
+            '<span class="cls-id">' + Q.esc(c.id) + '</span>' +
+            '<span class="cls-nm">' + Q.esc(c.name) + '</span>' +
+            '<span class="cls-ct">' + (cnt ? '✅ ' + cnt + ' 球' : '⬜ 漏了') + '</span></div>';
+        }).join('') : '<div class="tiny muted">' + emptyMsg + '</div>') +
+      '</div></div>';
+    }
+    var bucketsHtml = '<div class="card"><div class="card-h"><span class="card-t">🧺 同一栏里的等价分桶图</span><span class="card-sub">每只绿桶、红桶至少要放进 1 颗测试球</span></div>' +
+      '<div class="card-b"><div class="clsmap">' +
+        renderBuckets(r.classes.filter(function (c) { return c.validClass; }), '🟢 合法有效区（按规矩能过）', '无有效类') +
+        renderBuckets(r.classes.filter(function (c) { return !c.validClass; }), '🔴 非法无效区（必须拦在门外）', '无无效类') +
+      '</div></div></div>';
 
-    // 缺陷检出矩阵
-    h += '<section class="card"><h3 class="card-h">缺陷检出矩阵<span class="card-hint">评估当前用例集的故障捕获潜力</span></h3><div class="card-b">';
-    h += '<div class="dmatrix">' + res.matrix.map(function (m) {
-      var cls = m.detected ? 'dm-hit' : 'dm-miss';
-      return '<div class="dm ' + cls + (m.injected ? ' dm-inj' : '') + '">' +
-        '<div class="dm-h"><span class="chip">' + E(m.short) + '</span>' + (m.injected ? '<span class="tiny">已注入</span>' : '') + '</div>' +
-        '<div class="dm-n">' + E(m.name) + '</div>' +
-        '<div class="dm-r">' + (m.detected ? '✓ 可检出 · ' + m.caseCount + ' 条用例命中' : '✕ 检不出 · 无用例命中差异') + '</div>' +
-        '</div>';
+    /* 4只Bug卡片 */
+    var dmHtml = '<div class="dmatrix">' + r.matrix.map(function (d) {
+      return '<div class="dm ' + (d.detected ? 'dm-hit' : 'dm-miss') + (d.injected ? ' dm-inj' : '') + '">' +
+        '<div class="dm-h"><span class="mono" style="font-weight:800">' + Q.esc(d.id) + '</span>' +
+        Q.badge(d.detected ? 'pass' : 'mute', d.detected ? '🎉 抓住了 ' + d.caseCount + '次' : '还没抓到') + '</div>' +
+        '<div class="dm-n">' + Q.esc(DEFECT_PLAIN[d.id] || d.short) + '</div>' +
+        '<div class="dm-r">' + (d.id === 'RETRAIN_STACK' && !d.detected ? '💡 单改一个数捉不到它，点上方「⚡ 组合坑」!' : Q.esc(d.name)) + '</div>' +
+      '</div>';
     }).join('') + '</div>';
-    h += '<div class="chart-cap mt6">命中 = 预期与实际不一致。部分组合缺陷需要同时触发多个参数条件才会暴露。</div>';
-    h += '</div></section>';
 
-    // 用例表（收纳式卡片）
-    var rows = res.cases.map(function (c) {
-      return {
-        cls: c.pass ? 'row-pass' : 'row-fail',
-        cells: [
-          { html: '<b>' + E(c.id) + '</b>' },
-          { html: c.custom ? '<span class="chip">自定义</span>' : E(c.cls) },
-          { v: c.custom ? '组合' : String(c.value) },
-          { html: c.pass ? Q.badge('pass', '与预期一致') : Q.badge('fail', '不一致') },
-          { html: '<span class="mono">' + (c.expected.ok ? Q.fmtMoney(c.expected.payable) : 'E_INPUT') + '</span>' },
-          { html: '<span class="mono">' + (c.actual && c.actual.ok ? Q.fmtMoney(c.actual.payable) : 'E_INPUT') + '</span>' },
-          { html: c.hits.length ? c.hits.map(function (id) {
-            var inj = (st.defects || []).indexOf(id) >= 0;
-            return '<span class="chip' + (inj ? ' on' : '') + '" title="' + (inj ? '已注入' : '未注入，仅表示该用例能检出') + '">' + E(Q.DEFECT_MAP[id].short) + '</span>';
-          }).join(' ') : '<span class="muted">—</span>' }
-        ]
-      };
+    var d4 = r.matrix.find(function (m) { return m.id === 'RETRAIN_STACK'; });
+    var coachBox = !st.includeInvalid
+      ? Q.coach('bad', '警告：你把「非法无效区」关掉啦！', '只测正常数字（比如只测 1~120），一旦用户手抖输入 0 或小数，系统崩溃你也发现不了。赶紧在下面「高级调节」里勾选回去！')
+      : (d4 && !d4.detected
+        ? Q.coach('warn', '分桶已经 100% 亮绿灯，为啥还有 D4 组合 Bug 没抓到？', '因为每次只改一个框（其他框固定成默认值），永远碰不上“3人团体 + 复训老学员”同时发生的情况！点一下上面橙色按钮 <b>「⚡ 一键试组合坑 (D4)」</b> 立刻破案！')
+        : Q.coach('ok', '全能捕捉手！单桶和组合陷阱都抓到了', '你已经掌握了等价类精髓：同类挑 1 个代表就能大幅减少用例数；而跨字段的叠加规则，再额外补一条组合用例就万无一失！'));
+
+    /* 次级明细 + 自定义表单放进折叠抽屉 */
+    var caseRows = r.cases.map(function (c) {
+      return [
+        { html: '<span class="mono">' + Q.esc(c.id) + '</span>' },
+        c.cls === 'CUSTOM' ? { html: Q.badge('warn', '组合补充') } : c.clsName,
+        c.input.hours + '课时 / ' + c.input.seats + '人 / 券' + c.input.coupon + ' / ' + c.input.type,
+        c.expected.ok ? c.expected.payable + '元' : '拦截',
+        c.actual.ok ? c.actual.payable + '元' : '拦截',
+        { html: c.pass ? Q.badge('pass', '正常') : Q.badge('fail', '💥 爆Bug: ' + Q.esc(c.diff || '')) }
+      ];
     });
-    h += '<details class="sec-card"><summary class="sec-card-h">' +
-      '<span>用例与结果明细</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">共 ' + res.cases.length + ' 条 · 绿色边框为已注入缺陷</span><span class="sec-arrow">▾</span></span>' +
-      '</summary><div class="sec-card-b flush"><div class="tbl-scroll">' +
-      Q.table(['用例', '等价类', '取值', '判定', '预期应付(元)', '实际应付(元)', '可检出的缺陷'], rows) +
-      '</div></div></details>';
+    var custForm = '<div class="cust-grid mt12">' +
+      '<label>课时<input id="c-h" type="number" value="11"></label>' +
+      '<label>人数<input id="c-s" type="number" value="3"></label>' +
+      '<label>券(元)<input id="c-c" type="number" value="0"></label>' +
+      '<label>学员类型<select id="c-t"><option value="new">新生</option><option value="retrain" selected>复训</option><option value="corp">企业</option></select></label>' +
+      '<label>持证<select id="c-cert"><option value="1" selected>是</option><option value="0">否</option></select></label>' +
+      '<button type="button" class="btn primary sm" data-act="add-custom">+ 加一条用例</button>' +
+    '</div>';
+    var detailBody = Q.table(['编号', '所属桶', '填入参数', '应当结果', '实测结果', '判定'], caseRows) + custForm;
 
-    return h;
+    return kpis + ballStage + bucketsHtml + dmHtml + coachBox +
+      Q.drawer('📋 查看全部 ' + r.cases.length + ' 条测试用例明细 / 手写加一条', '含自定义组合输入框', detailBody, false);
   }
 
-  /* ------------------------------------------------------------ 验证区 */
-  function verify(res, st) {
-    var cov = res.coverage;
-    var okA = cov.rate === 100;
-    var okB = res.detectedCount === 4;
-    var hit = res.matrix.filter(function (x) { return x.detected; });
-    var miss = res.matrix.filter(function (x) { return !x.detected; });
-    var h = '<section class="card"><h3 class="card-h">结论验证区</h3><div class="card-b">';
-
-    h += Q.concl(okA ? 'ok' : 'no',
-      (okA ? '✓ ' : '✕ ') + '已覆盖 ' + cov.covered + ' / ' + cov.total + ' 个等价类',
-      [
-        ['覆盖详情', res.cases.length + ' 条用例 · 总体 ' + Q.num(cov.rate, 1) + '% · 无效类 ' + cov.invalidCovered + '/' + cov.invalidTotal],
-        cov.missed.length ? ['未覆盖', cov.missed.join('、')] : null
-      ]);
-
-    h += Q.concl(okB ? 'ok' : 'no',
-      (okB ? '✓ ' : '✕ ') + '可检出 ' + res.detectedCount + ' / 4 个故障',
-      [
-        ['已捕获', hit.length ? hit.map(function (x) { return x.short + '（' + x.caseCount + ' 条命中）'; }).join('、') : '暂无用例触发差异'],
-        miss.length ? ['能力边界', miss.map(function (x) { return x.short; }).join('、') + ' 属于多字段组合逻辑，单字段取样无法触及。'] : null
-      ]);
-
-    if (cov.rate === 100 && res.detectedCount < 4) {
-      h += Q.concl('insight', '◆ 关键启发：高覆盖 ≠ 零缺陷',
-        [['发现', '类覆盖率已达 100%，仍有 ' + (4 - res.detectedCount) + ' 处故障遗漏——等价类只保证测到每类，无法替代跨字段组合。']]);
+  function onAction(act, el, st, WB) {
+    if (act === 'drop-sample') {
+      var idx = Number(el.getAttribute('data-idx'));
+      st.lastBall = SAMPLE_BALLS[idx] || SAMPLE_BALLS[0];
+      st.ballSeq = (st.ballSeq || 0) + 1;
+      return true;
     }
-    h += '</div></section>';
-    return h;
-  }
-
-  function customBlock(st) {
-    var opts = Q.CONFIG.types.map(function (t) { return { v: t, l: Q.CONFIG.typeLabels[t] }; });
-    return '<section class="card"><h3 class="card-h">自定义组合用例<span class="card-hint">' + (st.custom || []).length + ' 条</span></h3><div class="card-b">' +
-      '<div class="cust-grid">' +
-      '<label>课时<input type="number" data-p="cHours" value="' + (st.cHours == null ? '' : st.cHours) + '" min="0" max="200" step="1"></label>' +
-      '<label>人数<input type="number" data-p="cSeats" value="' + (st.cSeats == null ? '' : st.cSeats) + '" min="0" max="30" step="1"></label>' +
-      '<label>券额<input type="number" data-p="cCoupon" value="' + (st.cCoupon == null ? '' : st.cCoupon) + '" min="0" max="600" step="1"></label>' +
-      '<label>类型<select data-p="cType">' + opts.map(function (o) {
-        return '<option value="' + o.v + '"' + (st.cType === o.v ? ' selected' : '') + '>' + o.l + '</option>';
-      }).join('') + '</select></label>' +
-      '<label>持证<select data-p="cHasCert"><option value="1"' + (st.cHasCert ? ' selected' : '') + '>是</option>' +
-      '<option value="0"' + (!st.cHasCert ? ' selected' : '') + '>否</option></select></label>' +
-      '<button class="btn primary sm" data-act="add-case">添加</button>' +
-      '</div>' +
-      ((st.custom || []).length ? '<div class="row wrap mt6">' + st.custom.map(function (c, i) {
-        return '<span class="chip">' + E(c.hours + '/' + c.seats + '/' + c.coupon + '/' + Q.CONFIG.typeLabels[c.type]) +
-          ' <button class="chip-x" data-act="del-case" data-arg="' + i + '" aria-label="删除">×</button></span>';
-      }).join('') + '</div>' : '') +
-      '</div></section>';
-  }
-
-  WB.registerExp({
-    id: 'm2', no: 2,
-    title: '等价类划分',
-    subtitle: '把无穷输入拆成有限个等价区间，用更少用例代表同类行为。',
-    chapter: '第8章 8.1.1 等价类划分法',
-    knowledge: '按规格划分有效/无效等价类，用类覆盖率与无效类覆盖度衡量用例集；理解类覆盖不等于缺陷检出。',
-    minutes: 12,
-    goals: [
-      '给任一字段划出有效类与无效类',
-      '看清覆盖率的分母是类数',
-      '造出“覆盖满但不报错”的反例'
-    ],
-    blockers: [
-      ['多测几个值 = 划分', '同类的值再多，覆盖的类也没变'],
-      ['无效类测一个就够', '越界和类型错走的是不同分支'],
-      ['覆盖率达标就放心', '组合场景全藏在类的缝隙里']
-    ],
-    theory: '<p>把输入空间按“处理逻辑相同”切成若干类，每类取代表值。有效类证明系统能做对，无效类证明它不会做错。</p>' +
-      '<div class="formula">类覆盖率 = 已覆盖的类 ÷ 类总数\n' +
-      '无效类覆盖率 = 已覆盖无效类 ÷ 无效类总数</div>' +
-      '<p class="mt6">分母由规格决定，不由你测多少决定。</p>',
-    prereq: '理解“有效域”与整数约束。',
-    scopeNote: '表单校验、金额计算这类由规格直接约束的输入。',
-    notDo: '不做组合测试与边界邻域分析。',
-
-    params: [
-      {
-        key: 'field', type: 'select', label: '被测字段', value: 'seats',
-        options: [
-          { v: 'hours', l: '培训课时数（1–120）' },
-          { v: 'seats', l: '报名人数（1–20）' },
-          { v: 'coupon', l: '优惠券面额（0–500）' }
-        ],
-        hint: '其余字段固定为基准值（11 课时 / 1 人 / 新学员 / 持证）。'
-      },
-      {
-        key: 'level', type: 'select', label: '划分粒度',
-        options: [
-          { v: 'coarse', l: '粗放 · 每字段 2 类' },
-          { v: 'standard', l: '标准 · 3–4 个有效类 + 3 个无效类' },
-          { v: 'fine', l: '精细 · 细分有效区间 + 3–4 个无效类' }
-        ],
-        hint: '粒度决定分母：类越多，达标越难。'
-      },
-      {
-        key: 'strategy', type: 'select', label: '取样策略',
-        options: [
-          { v: 'mid', l: '类中点（每类 1 个）' },
-          { v: 'edges', l: '类内两端（每类最多 2 个）' },
-          { v: 'seeded', l: '固定种子随机（种子 20261112）' }
-        ],
-        hint: '固定种子 20261112，可复现。'
-      },
-      { key: 'includeInvalid', type: 'check', label: '包含无效等价类用例', sub: '关闭后无效类不可能被覆盖', value: true },
-      { key: 'defects', type: 'checks', label: '注入缺陷', options: DEFECT_OPTS }
-    ],
-    defaults: {
-      field: 'seats', level: 'standard', strategy: 'mid', includeInvalid: true,
-      defects: ['SEAT_BOUNDARY'],
-      cHours: 1, cSeats: 1, cCoupon: 500, cType: 'new', cHasCert: true,
-      custom: [], snapA: null, snapB: null
-    },
-
-    compute: compute,
-    viz: function (res, st) { return viz(res, st) + customBlock(st); },
-    verify: verify,
-
-    onAction: function (name, arg, st) {
-      if (name === 'add-case') {
-        var h = st.cHours, s = st.cSeats, c = st.cCoupon;
-        var okNum = function (v, lo, hi) {
-          return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= lo && v <= hi;
-        };
-        if (!okNum(h, 0, 200)) { WB.toast('课时数需为 0–200 的整数（留空无效）', 'warn'); return false; }
-        if (!okNum(s, 0, 30)) { WB.toast('报名人数需为 0–30 的整数（留空无效）', 'warn'); return false; }
-        if (!okNum(c, 0, 600)) { WB.toast('券额需为 0–600 的整数（留空无效）', 'warn'); return false; }
-        st.custom = (st.custom || []).concat([{ hours: h, seats: s, coupon: c, type: st.cType, hasCert: !!st.cHasCert }]);
-        if (st.custom.length > 8) st.custom = st.custom.slice(-8);
-        WB.toast('已添加自定义用例');
-        return true;
-      }
-      if (name === 'del-case') {
-        st.custom = (st.custom || []).filter(function (_, i) { return String(i) !== String(arg); });
-        return true;
-      }
-      if (name === 'snap-a' || name === 'snap-b') {
-        var res = compute(st);
-        var snap = {
-          field: st.field, level: st.level, strategy: st.strategy,
-          cases: res.cases.length, rate: res.coverage.rate, detected: res.detectedCount,
-          injTotal: res.injected.length,
-          injHit: res.matrix.filter(function (m) { return m.injected && m.detected; }).length
-        };
-        st[name === 'snap-a' ? 'snapA' : 'snapB'] = snap;
-        WB.toast('已存为对照 ' + (name === 'snap-a' ? 'A' : 'B'));
-        return true;
-      }
-      if (name === 'snap-clear') { st.snapA = null; st.snapB = null; return true; }
-      return false;
-    },
-
-    evidence: function (res) {
-      var cov = res.coverage.rate;
-      var status = cov === 100 && res.detectedCount >= 3 ? 'pass' : (cov >= 60 ? 'warn' : 'fail');
-      var missed = res.matrix.filter(function (m) { return !m.detected; }).map(function (m) { return m.short; });
-      return {
-        status: status,
-        coverage: cov,
-        label: '等价类覆盖率',
-        defects: res.matrix.filter(function (m) { return m.detected; }).map(function (m) { return m.id; }),
-        note: res.cases.length + ' 条用例覆盖 ' + res.coverage.covered + '/' + res.coverage.total + ' 类，可检出 ' +
-          res.detectedCount + '/4 缺陷' + (missed.length ? '（未检出 ' + missed.join('/') + '）' : '')
-      };
+    if (act === 'combo-preset') {
+      st.customCases = [{ id: 'EX1', input: { hours: 11, seats: 3, coupon: 0, type: 'retrain', hasCert: true } }];
+      st.lastBall = SAMPLE_BALLS[5];
+      WB.toast('已填入“3人+复训”组合用例，立刻揪出 D4！');
+      return true;
     }
+    if (act === 'add-custom') {
+      var hRaw = String((document.getElementById('c-h') || {}).value || '').trim();
+      var sRaw = String((document.getElementById('c-s') || {}).value || '').trim();
+      var cRaw = String((document.getElementById('c-c') || {}).value || '').trim();
+      if (!hRaw || !sRaw || !cRaw || isNaN(Number(hRaw)) || isNaN(Number(sRaw)) || isNaN(Number(cRaw))) {
+        WB.toast('课时、人数或券额留空无效，请填入数字后再添加', 'warn');
+        return false;
+      }
+      var t = (document.getElementById('c-t') || {}).value || 'new';
+      var cert = ((document.getElementById('c-cert') || {}).value || '1') === '1';
+      st.customCases = (st.customCases || []).concat([{
+        id: 'U' + (st.customCases.length + 1),
+        input: { hours: Number(hRaw), seats: Number(sRaw), coupon: Number(cRaw), type: t, hasCert: cert }
+      }]);
+      return true;
+    }
+  }
+
+  function evidence(res) {
+    var r = res.r;
+    var ok = r.coverage.rate >= 100 && r.failCount > 0;
+    return {
+      status: ok ? 'pass' : 'warn',
+      pass: ok,
+      coverage: r.coverage.rate || 0,
+      label: '等价类覆盖率',
+      defects: r.matrix.filter(function (m) { return m.detected; }).map(function (m) { return m.id; }),
+      summary: '分桶覆盖 ' + Q.pctText(r.coverage.rate) + '，抓获 ' + r.detectedCount + '/' + r.matrix.length + ' 只缺陷',
+      metrics: { coverage: r.coverage.rate, failCount: r.failCount }
+    };
+  }
+
+  function theory() {
+    return Q.coach('info', '一句话记牢等价类划分',
+      '<b>物以类聚，同一批输入挑 1 个代表就够了！</b>记住两个铁律：合法的每类挑 1 个，<b>非法的也要专门挑</b>；遇到“满 3 人且是复训”这种多条件组合，要另补一条合体用例！');
+  }
+
+  window.WB.registerExp({
+    id: 'm2', no: 2, group: '黑盒用例设计',
+    title: '等价分区 · 投篮分类', chapter: '第 2 章 · 等价类划分',
+    hook: '把几百万种输入分进几只代表桶，挑代表去抓错',
+    goal: ['不用穷举，每类挑 1 个代表也能抓虫', '明白为什么只测单一输入框会漏掉组合 Bug'],
+    defaults: makeDefaults(), params: buildParams,
+    compute: compute, viz: viz, onAction: onAction, evidence: evidence, theory: theory
   });
 })();

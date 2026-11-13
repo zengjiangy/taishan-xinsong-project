@@ -168,9 +168,44 @@
       '</svg><span class="q-ring-txt">' + esc(text) + '</span></div>';
   }
 
+  /* 卡通风大号 KPI 磁贴行 */
+  function kpiStrip(items) {
+    return '<div class="kpi-strip">' + (items || []).filter(Boolean).map(function (it) {
+      var tone = it.tone || 'blue';
+      return '<div class="kpi-tile tone-' + attr(tone) + '">' +
+        '<div class="kpi-top">' + (it.icon ? '<span class="kpi-ico">' + it.icon + '</span>' : '') +
+        '<span class="kpi-lbl">' + esc(it.label) + '</span></div>' +
+        '<div class="kpi-val">' + esc(String(it.value)) + '</div>' +
+        (it.sub ? '<div class="kpi-sub">' + esc(it.sub) + '</div>' : '') +
+        '</div>';
+    }).join('') + '</div>';
+  }
+
+  /* 大白话教练反馈气泡（kind: ok | warn | bad | info） */
+  function coach(kind, title, htmlBody, extraHtml) {
+    var icons = { ok: '🎉', warn: '💡', bad: '🚨', info: '🧑‍🏫' };
+    var k = icons[kind] ? kind : 'info';
+    return '<div class="coach-fb is-' + k + '">' +
+      '<div class="cf-ico" aria-hidden="true">' + icons[k] + '</div>' +
+      '<div class="cf-main">' +
+        '<div class="cf-title">' + esc(title || '大白话小结') + '</div>' +
+        '<div class="cf-text">' + htmlBody + '</div>' +
+        (extraHtml ? '<div class="cf-extra">' + extraHtml + '</div>' : '') +
+      '</div></div>';
+  }
+
+  /* 折叠抽屉（把繁琐明细收进一行，界面清爽不拥挤） */
+  function drawer(title, hint, bodyHtml, open) {
+    return '<details class="sec-card"' + (open ? ' open' : '') + '>' +
+      '<summary class="sec-card-h"><span>' + esc(title) + '</span>' +
+      '<span class="tiny muted">' + esc(hint || '点击展开') + ' <i class="sec-arrow">▾</i></span></summary>' +
+      '<div class="sec-card-b">' + bodyHtml + '</div></details>';
+  }
+
   return {
     esc: esc, attr: attr, num: num, pctText: pctText,
     badge: badge, card: card, kv: kv, table: table, meter: meter, empty: empty, legend: legend,
-    lineChart: lineChart, hbars: hbars, ring: ring, concl: concl
+    lineChart: lineChart, hbars: hbars, ring: ring, concl: concl,
+    kpiStrip: kpiStrip, coach: coach, drawer: drawer
   };
 });

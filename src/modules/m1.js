@@ -1,281 +1,217 @@
 /* ============================================================================
- * m1.js — 实验一：静态测试与代码审查
- * 交互：在代码行上逐行标注缺陷类型，提交后与人工基线比对，得到检出率/类型正确率/误报率。
+ * m1.js — 第 1 关：静态代码抓茬游乐场
  * ==========================================================================*/
 (function () {
   'use strict';
-  var Q = window.QT, WB = window.WB;
-  var E = Q.esc;
+  var Q = window.QT;
 
-  var SEV_LABEL = { trivial: '轻微', minor: '一般', major: '严重', fatal: '致命' };
   var TYPE_LABEL = {};
   Q.SR_DEFECT_TYPES.forEach(function (t) { TYPE_LABEL[t.key] = t.label; });
+  var SEV_LABEL = { trivial: '轻微', minor: '一般', major: '严重', fatal: '致命' };
+  var SEV_BADGE = { trivial: 'mute', minor: 'warn', major: 'fail', fatal: 'fail' };
 
-  function compute(st) {
-    var lines = Q.SR_CODE[st.version] || [];
-    var rev = Q.srReview(st.version, st.marks || {}, { scope: st.scope, severityThreshold: st.sevThreshold });
-    var scan = Q.srRuleScan(st.version, st.rules || []);
-    var scanRev = Q.srReview(st.version, scan.marks, { scope: st.scope, severityThreshold: st.sevThreshold });
-    return { lines: lines, rev: rev, scan: scan, scanRev: scanRev };
+  function makeDefaults() {
+    return {
+      version: 'v1.0',
+      scope: 'all',
+      severityThreshold: 'trivial',
+      activeType: 'validation',
+      marks: {},
+      rules: Q.SR_RULES.map(function (r) { return r.id; }),
+      revealed: false,
+      scanning: false
+    };
   }
 
-  /* ---------------------------------------------------------- 代码视图 */
-  function codeView(res, st) {
-    var marks = st.marks || {};
-    var out = ['<div class="codeview">'];
-    res.lines.forEach(function (text, i) {
-      var no = i + 1;
-      var inScope = Q.srInScope(st.scope, no);
-      var type = marks[no];
-      var missedLine = false;
-      if (st.reveal) missedLine = res.rev.missed.some(function (d) { return d.lines.indexOf(no) >= 0; });
-      var cls = 'code-line clk';
-      if (!inScope) cls += ' dimline';
-      if (type) cls += ' mark';
-      if (missedLine && !type) cls += ' missed';
-      out.push('<div class="' + cls + '" data-act="toggle-line" data-arg="' + no + '" role="button" tabindex="0"' +
-        ' aria-label="第 ' + no + ' 行' + (type ? '，已标注为' + TYPE_LABEL[type] : '，未标注') + '">' +
-        '<span class="cl-no">' + no + '</span>' +
-        '<span class="cl-tx">' + E(text || ' ') + '</span>' +
-        (type ? '<span class="cl-tag">' + E(TYPE_LABEL[type] || type) + '</span>' : '') +
-        (missedLine && !type ? '<span class="cl-tag cl-tag-miss">漏检</span>' : '') +
-        '</div>');
-    });
-    out.push('</div>');
-    return out.join('');
-  }
-
-  function rateText(v) { return v == null ? '—' : Q.num(v, 1) + '%'; }
-
-  function viz(res, st) {
-    var rev = res.rev, m = rev.metrics;
-    var h = '';
-
-    h += '<section class="card"><h3 class="card-h">实时反馈 · 审查结果比对<span class="card-hint">范围内基线缺陷 ' +
-      rev.totalInScope + ' 处</span></h3><div class="card-b">';
-
-    h += '<div class="metrics mb10">' +
-      '<div class="metric hl"><div class="m-l">缺陷检出率</div><div class="m-v">' + (m.detectionRate == null ? '—' : Q.num(m.detectionRate, 1) + '<small>%</small>') + '</div></div>' +
-      '<div class="metric"><div class="m-l">类型正确率</div><div class="m-v">' + (m.typeAccuracy == null ? '—' : Q.num(m.typeAccuracy, 1) + '<small>%</small>') + '</div></div>' +
-      '<div class="metric"><div class="m-l">相对基线误报率</div><div class="m-v">' + (m.falsePositiveRate == null ? '—' : Q.num(m.falsePositiveRate, 1) + '<small>%</small>') + '</div></div>' +
-      '<div class="metric"><div class="m-l">已标注行数</div><div class="m-v">' + rev.markedCount + '</div></div>' +
-      '<div class="metric"><div class="m-l">范围外缺陷</div><div class="m-v">' + rev.outOfScope + '</div></div>' +
-      '</div>';
-
-    h += '<div class="callout"><b>怎么标注：</b>在左下“标注笔”里选好缺陷类型，点击代码行打标；再点一次取消。' +
-      '也可以先用规则扫描标一遍，但规则会漏也会错——要自己判断。</div>';
-
-    h += '<div class="btn-row mb6">' +
-      '<button class="btn primary sm" data-act="scan-rules">运行规则扫描（' + (st.rules || []).length + ' 条规则）</button>' +
-      '<button class="btn sm" data-act="clear-marks">清空我的标注</button>' +
-      '<span class="tiny muted">当前标注笔：' + E(TYPE_LABEL[st.pen]) + '</span>' +
-      '</div>';
-
-    h += codeView(res, st);
-    h += '<div class="cv-legend">' +
-      '<span><i class="cv-swatch" style="background:#fdeceb;border-color:#b42318"></i>你的标注</span>' +
-      (st.reveal ? '<span><i class="cv-swatch" style="background:#fff;border-color:#b42318;border-style:dashed"></i>基线有、你漏掉的行</span>' : '') +
-      '<span><i class="cv-swatch" style="background:#f2f4f5;border-color:#e0e5e9"></i>当前审查范围外</span>' +
-      '</div>';
-    if (st.reveal) {
-      h += '<p class="tiny muted mt6">提示：参考基线代表常见资深评审观点，若真实隐患尚未被基线收录，统计时可能先计入相对误报——可借此辨析评审视角差异。</p>';
-    }
-    h += '</div></section>';
-
-    // 分类矩阵 & 规则 vs 人工对比收纳
-    var byType = {};
-    Q.SR_DEFECT_TYPES.forEach(function (t) { byType[t.key] = { found: 0, miss: 0, label: t.label }; });
-    rev.detected.forEach(function (d) { if (byType[d.expectedType]) byType[d.expectedType].found++; });
-    rev.missed.forEach(function (d) { if (byType[d.type]) byType[d.type].miss++; });
-    var rows = Q.SR_DEFECT_TYPES.map(function (t) {
-      var b = byType[t.key];
-      if (!b.found && !b.miss) return null;
-      return {
-        cells: [
-          { v: b.label },
-          { html: '<span class="mono">' + b.found + '</span>' },
-          { html: '<span class="mono">' + b.miss + '</span>' },
-          { html: Q.meter(Q.pct(b.found, b.found + b.miss, 1), { label: b.label }) }
-        ]
-      };
-    }).filter(Boolean);
-
-    h += '<details class="sec-card"><summary class="sec-card-h">' +
-      '<span>漏检与误报清单</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">漏检 ' + rev.missed.length + ' 处 · 误报 ' + rev.falsePositives.length + ' 处</span><span class="sec-arrow">▾</span></span>' +
-      '</summary><div class="sec-card-b">';
-    if (!rev.missed.length && !rev.falsePositives.length) {
-      h += '<p class="tiny muted">当前没有漏检，也没有相对基线的误报。</p>';
-    }
-    if (rev.missed.length) {
-      h += '<div class="mb6"><b class="tiny">漏检 ' + rev.missed.length + ' 处：</b></div>' +
-        rev.missed.map(function (d) {
-          return '<div class="listitem"><span class="chip">' + E(d.id) + '</span> <b>' + E(d.title) + '</b>' +
-            ' <span class="tiny muted">（' + SEV_LABEL[d.severity] + '，第 ' + d.lines.join('、') + ' 行）</span>' +
-            '<div class="tiny muted">' + E(d.desc) + '</div></div>';
-        }).join('');
-    }
-    if (rev.falsePositives.length) {
-      h += '<div class="mb6 mt10"><b class="tiny">相对基线的误报 ' + rev.falsePositives.length + ' 处：</b></div>' +
-        rev.falsePositives.map(function (f) {
-          return '<div class="listitem"><span class="chip">第 ' + f.line + ' 行</span> ' +
-            '<span class="tiny">标为「' + E(TYPE_LABEL[f.type] || f.type) + '」</span>' +
-            '<div class="tiny muted mono">' + E((f.text || '').trim()) + '</div></div>';
-        }).join('');
-    }
-    h += '</div></details>';
-
-    h += '<details class="sec-card"><summary class="sec-card-h">' +
-      '<span>缺陷类型分布与规则对比</span>' +
-      '<span class="row" style="gap:8px"><span class="card-hint">规则扫描 vs 人工标注</span><span class="sec-arrow">▾</span></span>' +
-      '</summary><div class="sec-card-b"><div class="grid g2">' +
-      (rows.length ? '<div><div class="tiny muted mb6">按缺陷类型拆解</div>' + Q.table(['缺陷类型', '已检出', '漏检', '检出率'], rows) + '</div>' : '') +
-      '<div><div class="tiny muted mb6">规则扫描 vs 人工标注</div>' +
-      Q.table(['指标', '规则扫描', '人工标注'], [
-        ['检出率', rateText(res.scanRev.metrics.detectionRate), rateText(m.detectionRate)],
-        ['类型正确率', rateText(res.scanRev.metrics.typeAccuracy), rateText(m.typeAccuracy)],
-        ['相对基线误报率', rateText(res.scanRev.metrics.falsePositiveRate), rateText(m.falsePositiveRate)],
-        ['标注行数', String(res.scanRev.markedCount), String(rev.markedCount)]
-      ]) +
-      '<div class="chart-cap">规则擅长抓格式与固定模式（空 catch、敏感日志、硬编码）；语义重复与事务缺失需人工阅读。</div></div>' +
-      '</div></div></details>';
-
-    return h;
-  }
-
-  function verify(res, st) {
-    var rev = res.rev, m = rev.metrics;
-    var any = rev.markedCount > 0;
-    var okA = m.detectionRate != null && m.detectionRate >= 80;
-    var okB = m.falsePositiveRate != null && m.falsePositiveRate <= 25;
-    var h = '<section class="card"><h3 class="card-h">结论验证区</h3><div class="card-b">';
-
-    h += Q.concl(!any ? 'no' : (okA ? 'ok' : 'no'),
-      (!any ? '· ' : (okA ? '✓ ' : '✕ ')) + '检出基线缺陷 ' + rev.detected.length + ' / ' + rev.totalInScope + ' 处',
-      [
-        ['命中点', any ? (rev.detected.map(function (d) { return d.id + '（第 ' + d.line + ' 行）'; }).join('、') || '暂无标注命中基线') : '请先点击代码行号添加标注。'],
-        rev.missed.length ? ['仍漏检', rev.missed.map(function (d) { return d.title; }).join('；')] : null,
-        rev.outOfScope ? ['口径说明', '另有 ' + rev.outOfScope + ' 处超出当前审查范围，不计入分母。'] : null
-      ]);
-
-    h += Q.concl(!any ? 'no' : (okB ? 'ok' : 'no'),
-      (!any ? '· ' : (okB ? '✓ ' : '✕ ')) + '误报率 ' + rateText(m.falsePositiveRate),
-      [
-        ['统计', '共标 ' + rev.markedCount + ' 行，其中 ' + rev.falsePositives.length + ' 行未在参考基线中。'],
-        okB ? null : ['提示', '盲目全标虽能提高检出，但高误报会淹没真正的风险。']
-      ]);
-
-    h += '</div></section>';
-    return h;
-  }
-
-  WB.registerExp({
-    id: 'm1', no: 1, navLabel: '静态审查',
-    title: '静态测试与代码审查',
-    subtitle: '不运行程序，在提交前通过编码规则与人工走查提前拦截缺陷。',
-    chapter: '第7章 7.1–7.5 静态测试技术',
-    knowledge: '识别静态测试对象与手段；执行代码审查并区分缺陷类型与严重度；理解工具规则的检出上限与误报代价。',
-    minutes: 14,
-    goals: [
-      '分清静态测试与动态测试',
-      '逐行标注缺陷并归类',
-      '用三个指标评价一次评审'
-    ],
-    blockers: [
-      ['跑个工具就算静态测试', '规则只认得能写成模式的问题'],
-      ['标得越多越好', '误报一多，评审报告就没人看了'],
-      ['风格问题当缺陷', '命名是规范问题，漏校验才是缺陷']
-    ],
-    theory: '<p>不运行程序，直接读代码。它找的是“看得见的问题”：入参没校验、异常被吞、逻辑重复。</p>' +
-      '<div class="formula">检出率 = 检出缺陷 ÷ 范围内缺陷\n' +
-      '类型正确率 = 类型标对 ÷ 已检出\n' +
-      '误报率 = 基线未收录的标注行 ÷ 你的标注行</div>' +
-      '<p class="mt6">三个分母不同，别混着读。</p>',
-    prereq: '能读懂 JavaScript 函数。',
-    scopeNote: '评审会的个体审查环节。',
-    notDo: '不做控制流与调用链分析。',
-
-    params: [
+  function buildParams(st) {
+    return [
       {
-        key: 'version', type: 'select', label: '审查对象版本',
+        key: 'version', label: '选一份代码剧本', type: 'pills',
         options: [
-          { v: 'v1.0', l: 'v1.0 首版（缺陷最多）' },
-          { v: 'v1.1', l: 'v1.1 修复部分评审意见' },
-          { v: 'v1.2', l: 'v1.2 候选版（缺陷最少）' }
-        ],
-        hint: '切换版本会清空标注，因为行号与内容都变了。'
+          { v: 'v1.0', l: '📄 初版 v1.0（虫子多）' },
+          { v: 'v1.1', l: '🔧 修复版 v1.1' }
+        ]
       },
       {
-        key: 'scope', type: 'select', label: '审查范围',
-        options: Q.SR_SCOPES.map(function (s) { return { v: s.key, l: s.label }; }),
-        hint: '范围直接改变检出率的<b>分母</b>，是最直观的“指标口径”演示。'
-      },
-      {
-        key: 'pen', type: 'select', label: '标注笔（点行时使用的类型）',
+        key: 'activeType', label: '点代码行贴的标签', type: 'select',
         options: Q.SR_DEFECT_TYPES.map(function (t) { return { v: t.key, l: t.label }; })
       },
+      { type: 'action', action: 'rule-scan', label: '🔍 一键自动扫雷', variant: 'primary' },
+      { type: 'action', action: 'reveal-all', label: st.revealed ? '🙈 收起答案' : '💡 揭晓全部真Bug', variant: 'fun' },
+      { type: 'action', action: 'clear-marks', label: '🧹 清空标记', variant: '' },
+      { key: 'scope', label: '只看哪一段', type: 'select', advanced: true, options: Q.SR_SCOPES.map(function (s) { return { v: s.key, l: s.label }; }) },
       {
-        key: 'rules', type: 'checks', label: '启用的检查规则', group: '规则与门槛',
-        options: Q.SR_RULES.map(function (r) {
-          return { v: r.id, l: r.id + ' ' + r.name };
-        })
-      },
-      {
-        key: 'sevThreshold', type: 'select', label: '评审通过门槛', group: '规则与门槛',
+        key: 'severityThreshold', label: '门禁拦截严格度', type: 'select', advanced: true,
         options: [
-          { v: 'major', l: '不允许残留“严重”及以上缺陷' },
-          { v: 'minor', l: '不允许残留“一般”及以上缺陷' },
-          { v: 'trivial', l: '任何残留缺陷都不通过' }
-        ],
-        hint: '门槛只影响“是否通过评审”，不改变检出率。'
+          { v: 'trivial', l: '轻微以上全算（0容忍）' },
+          { v: 'minor', l: '一般以上' },
+          { v: 'major', l: '只拦严重/致命' },
+          { v: 'fatal', l: '只拦致命' }
+        ]
       },
-      { key: 'reveal', type: 'check', label: '对照基线（显示漏检位置）', sub: '相当于看教师参考答案' }
-    ],
-    defaults: {
-      version: 'v1.0', scope: 'all', pen: 'exception', sevThreshold: 'major', reveal: false,
-      rules: Q.SR_RULES.map(function (r) { return r.id; }),
-      marks: {}
-    },
-
-    compute: compute,
-    viz: viz,
-    verify: verify,
-
-    onParam: function (key, st) {
-      if (key === 'version') st.marks = {};
-    },
-
-    onAction: function (name, arg, st) {
-      if (name === 'toggle-line') {
-        var no = Number(arg);
-        st.marks = st.marks || {};
-        if (st.marks[no]) delete st.marks[no];
-        else st.marks[no] = st.pen;
-        return true;
+      {
+        key: 'rules', label: '自动扫雷工具规则开关', type: 'checks', advanced: true,
+        options: Q.SR_RULES.map(function (r) { return { v: r.id, l: r.id + ' ' + r.title, sub: r.note }; })
       }
-      if (name === 'scan-rules') {
-        var scan = Q.srRuleScan(st.version, st.rules || []);
-        st.marks = Object.assign({}, st.marks || {}, scan.marks);
-        WB.toast('规则扫描命中 ' + scan.count + ' 处，已合并到标注（可能含误报）');
-        return true;
-      }
-      if (name === 'clear-marks') { st.marks = {}; return true; }
-      return false;
-    },
+    ];
+  }
 
-    evidence: function (res) {
-      var m = res.rev.metrics;
-      var rate = m.detectionRate;
-      var status = rate != null && rate >= 80 && (m.falsePositiveRate == null || m.falsePositiveRate <= 25)
-        ? 'pass' : (rate != null && rate >= 50 ? 'warn' : 'fail');
-      return {
-        status: status,
-        coverage: rate,
-        label: '缺陷检出率（相对基线）',
-        defects: res.rev.detected.map(function (d) { return d.id; }),
-        note: '版本 ' + res.rev.version + '，范围 ' + res.rev.scope + '，检出 ' + res.rev.detected.length + '/' +
-          res.rev.totalInScope + '，误报率 ' + rateText(m.falsePositiveRate)
-      };
+  function compute(st) {
+    var review = Q.srReview(st.version, st.marks, { scope: st.scope, severityThreshold: st.severityThreshold });
+    var lines = Q.SR_CODE[st.version] || [];
+    var scan = Q.srRuleScan(st.version, st.rules);
+    return { review: review, lines: lines, scan: scan, threshold: st.severityThreshold, revealed: st.revealed };
+  }
+
+  function viz(res, st) {
+    var r = res.review;
+    var base = Q.SR_BASELINE[st.version] || [];
+    var baseByLine = {};
+    base.forEach(function (d) { d.lines.forEach(function (ln) { baseByLine[ln] = d; }); });
+
+    var kpis = Q.kpiStrip([
+      { icon: '🐛', label: '已揪出真 Bug', value: r.detected.length + ' / ' + r.totalInScope, sub: '点击下面可疑代码行捉虫', tone: r.detected.length >= r.totalInScope ? 'ok' : 'blue' },
+      { icon: '🎯', label: '抓虫命中率', value: Q.pctText(r.metrics.detectionRate), sub: '自动工具+人工复查配合', tone: 'teal' },
+      { icon: '😅', label: '误伤好代码', value: r.falsePositives.length + ' 处', sub: '乱标会被工具提示', tone: r.falsePositives.length ? 'warn' : 'ok' },
+      { icon: '🚦', label: '静态放行判定', value: r.gateOk ? '已过关' : '未过关', sub: r.gateOk ? '门禁内漏洞已清空' : '还漏 ' + r.remaining.length + ' 只必抓虫', tone: r.gateOk ? 'ok' : 'bad' }
+    ]);
+
+    var codeRows = res.lines.map(function (tx, idx) {
+      var ln = idx + 1;
+      var inSc = Q.srInScope(st.scope, ln);
+      var mk = st.marks[ln];
+      var realD = baseByLine[ln];
+      var missedShown = st.revealed && realD && !mk && inSc;
+      var cls = 'code-line' + (inSc ? ' clk' : ' dimline') + (mk ? ' mark' : '') + (missedShown ? ' missed' : '');
+      var tag = '';
+      if (mk && realD) tag = '<span class="bug-wiggle">🐛</span><span class="cl-tag">✅ 抓到了 · ' + Q.esc(TYPE_LABEL[mk] || mk) + '</span>';
+      else if (mk) tag = '<span class="cl-badge">' + Q.esc(TYPE_LABEL[mk] || mk) + '（好代码误报）</span>';
+      else if (missedShown) tag = '<span class="cl-tag-miss">🚨 漏网真虫 · ' + Q.esc(realD.title) + '</span>';
+
+      return '<div class="' + cls + '" data-act="toggle-mark" data-line="' + ln + '">' +
+        '<span class="cl-no">' + ln + '</span>' +
+        '<span class="cl-tx">' + Q.esc(tx || ' ') + '</span>' + tag +
+      '</div>';
+    }).join('');
+
+    var codeCard = '<div class="card code-scan-wrap">' +
+      (st.scanning ? '<div class="scan-beam"></div>' : '') +
+      '<div class="card-h">' +
+        '<div><span class="card-t">📄 被审查代码：bookingService.js (' + Q.esc(st.version) + ')</span> ' +
+        '<span class="card-sub">直接点击代码行就能标出 Bug / 再点一次取消</span></div>' +
+        '<span class="badge mute">当前标签：' + Q.esc(TYPE_LABEL[st.activeType] || st.activeType) + '</span>' +
+      '</div>' +
+      '<div class="codeview">' + codeRows + '</div>' +
+    '</div>';
+
+    var coachBox = '';
+    if (r.empty) {
+      coachBox = Q.coach('info', '先点一下「🔍 一键自动扫雷」试试看！',
+        '不用一行行干瞪眼！点按钮让机器扫描器先跑一遍，它会亮出<b>表面明显不对劲的地方</b>；但它抓不到“业务写反、吞掉报错”这类藏得深的逻辑虫，需要你接着点代码行补齐。');
+    } else if (r.gateOk) {
+      coachBox = Q.coach('ok', '漂亮！这轮静态评审全部抓齐了',
+        '你一共标了 <b>' + r.markedCount + '</b> 处，命中全部 <b>' + r.totalInScope + '</b> 个关键隐患（误报 ' + r.falsePositives.length + ' 处）。记住：静态审查不用运行程序，就能省掉大量返工！');
+    } else {
+      coachBox = Q.coach('warn', '机器扫完了，但还有 ' + r.remaining.length + ' 只深层逻辑 Bug 藏在代码里！',
+        '工具只会按字面规则找（比如 <code>console.log</code>、硬编码数字），像 <code>catch (e) {}</code> 吞报错、<code>order.data</code> 没判空这种语义问题机器看不懂。点「💡 揭晓全部真Bug」或自己点可疑行揪出来！');
     }
+
+    var detailRows = [];
+    r.detected.forEach(function (d) {
+      detailRows.push([
+        { html: Q.badge('pass', '✅ 已抓获') },
+        '第 ' + d.line + ' 行',
+        d.title,
+        { html: Q.badge(SEV_BADGE[d.severity], SEV_LABEL[d.severity]) },
+        d.typeOk ? '标签全对' : '位置对'
+      ]);
+    });
+    (st.revealed ? r.missed : []).forEach(function (d) {
+      detailRows.push([
+        { html: Q.badge('fail', '🚨 漏网') },
+        '第 ' + d.lines.join('/') + ' 行',
+        d.title,
+        { html: Q.badge(SEV_BADGE[d.severity], SEV_LABEL[d.severity]) },
+        d.desc
+      ]);
+    });
+    r.falsePositives.forEach(function (fp) {
+      detailRows.push([
+        { html: Q.badge('warn', '😅 误报') },
+        '第 ' + fp.line + ' 行',
+        '本行无缺陷',
+        '—',
+        '自动规则太敏感触发了假警报'
+      ]);
+    });
+    var detailHtml = detailRows.length
+      ? Q.table(['状态', '位置', '问题名称', '等级', '大白话说明'], detailRows)
+      : Q.empty('还没有任何标记，点击代码行或点「一键自动扫雷」试试吧', '🔍');
+
+    return kpis + codeCard + coachBox +
+      Q.drawer('📋 抓虫结果明细单（含误报与漏网说明）', detailRows.length + ' 条记录', detailHtml, false);
+  }
+
+  function onAction(act, el, st, WB, update) {
+    if (act === 'toggle-mark') {
+      var ln = Number(el.getAttribute('data-line'));
+      if (!Q.srInScope(st.scope, ln)) { WB.toast('该行不在当前筛选范围内', 'warn'); return; }
+      if (st.marks[ln]) delete st.marks[ln];
+      else st.marks[ln] = st.activeType || 'validation';
+      return true;
+    }
+    if (act === 'rule-scan') {
+      var scan = Q.srRuleScan(st.version, st.rules);
+      Object.keys(scan.marks).forEach(function (k) {
+        var ln = Number(k);
+        if (Q.srInScope(st.scope, ln) && !st.marks[ln]) st.marks[ln] = scan.marks[ln];
+      });
+      st.scanning = true;
+      update(false);
+      setTimeout(function () {
+        st.scanning = false;
+        if (window.location.hash.indexOf('exp/m1') >= 0) update(false);
+      }, 1150);
+      WB.toast('自动扫雷已标出 ' + scan.count + ' 处疑似点！');
+      return;
+    }
+    if (act === 'reveal-all') {
+      st.revealed = !st.revealed;
+      return 'sync-ctrl';
+    }
+    if (act === 'clear-marks') {
+      st.marks = {};
+      st.revealed = false;
+      return 'sync-ctrl';
+    }
+  }
+
+  function evidence(res) {
+    var r = res.review;
+    var mapId = { D1: 'STATIC_D1', D2: 'STATIC_D2', D3: 'STATIC_D3', D4: 'STATIC_D4', D5: 'STATIC_D5', D6: 'STATIC_D6', D7: 'STATIC_D7' };
+    var foundIds = r.detected.map(function (d) { return mapId[d.id]; }).filter(Boolean);
+    return {
+      status: r.gateOk ? 'pass' : (r.detected.length ? 'warn' : 'fail'),
+      pass: r.gateOk,
+      coverage: r.metrics.detectionRate == null ? 0 : r.metrics.detectionRate,
+      label: '缺陷检出率',
+      defects: foundIds,
+      summary: '抓到 ' + r.detected.length + '/' + r.totalInScope + ' 只虫（命中率 ' + Q.pctText(r.metrics.detectionRate) + '）',
+      metrics: { detectionRate: r.metrics.detectionRate, marked: r.markedCount }
+    };
+  }
+
+  function theory() {
+    return Q.coach('info', '一句话记牢静态找茬',
+      '<b>代码都不用跑</b>，靠人眼走查 + 自动扫雷工具，就能提前把低级拼写错、敏感信息泄露、明显空指针干掉。记住：<b>工具只能帮抓表面规范，逻辑对不对还得靠人或测试用例验证！</b>');
+  }
+
+  window.WB.registerExp({
+    id: 'm1', no: 1, group: '静态审查与基础',
+    title: '静态找茬 · 代码扫雷', chapter: '第 6 章 · 静态测试与代码审查',
+    hook: '不运行代码，也能靠扫描+肉眼把隐藏 Bug 揪出来',
+    goal: ['体会“自动扫雷工具能抓多少、漏多少”', '分清表面报错和深层业务逻辑漏洞'],
+    defaults: makeDefaults(), params: buildParams,
+    compute: compute, viz: viz, onAction: onAction, evidence: evidence, theory: theory
   });
 })();
